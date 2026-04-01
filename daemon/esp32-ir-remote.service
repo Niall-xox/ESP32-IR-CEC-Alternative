@@ -1,0 +1,17 @@
+[Unit]
+Description=ESP32 IR Remote Daemon
+# Must start after logind is running — we connect to it over D-Bus at startup
+After=systemd-logind.service
+Requires=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/esp32-ir-daemon
+# Restart on unexpected exit (e.g. serial port disconnected).
+# Does not restart on clean exit (e.g. systemd stopping the service for shutdown).
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# Start automatically when the system reaches the normal multi-user state
+WantedBy=multi-user.target

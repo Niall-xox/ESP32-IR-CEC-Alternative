@@ -1,0 +1,10 @@
+# PlatformIO build output
+.pio/
+
+# CMake build output
+build/
+CMakeCache.txt
+CMakeFiles/
+
+# Claude Code internal files
+.claude/
