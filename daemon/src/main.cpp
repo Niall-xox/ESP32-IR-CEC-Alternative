@@ -15,6 +15,8 @@
 
 #ifdef __linux__
 #include "LinuxPowerMonitor.h"
+#elif defined(_WIN32)
+#include "WindowsPowerMonitor.h"
 #endif
 
 #include <iostream>
@@ -48,6 +50,9 @@ int main() {
         std::cerr << "[error] Failed to connect to D-Bus: " << e.what() << "\n";
         return 1;
     }
+#elif defined(_WIN32)
+    monitor = std::make_unique<WindowsPowerMonitor>();
+    std::cout << "[monitor] Windows Service power monitor initialised\n";
 #else
     std::cerr << "[error] No power monitor available for this platform\n";
     return 1;

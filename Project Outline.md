@@ -67,9 +67,9 @@ correct TV state regardless of any prior state drift.
 
 **OLED display states:**
 - `Waiting...` — idle, no command received
-- `TV On` — ON command sent
-- `TV Off` — OFF command sent
-- `HID Err` — unknown command received
+- `TV On` — shown for 5 seconds after ON command, then reverts to `Waiting...`
+- `TV Off` — shown for 5 seconds after OFF command, then reverts to `Waiting...`
+- `HID Err` — shown for 5 seconds after unknown command, then reverts to `Waiting...`
 
 ---
 
@@ -120,7 +120,7 @@ compiled in or out by CMake based on the target OS.
 
 ### Platform implementation map
 
-| Concern       | Linux                      | Windows (Phase 2)                |
+| Concern       | Linux                      | Windows                          |
 |---------------|----------------------------|----------------------------------|
 | Power events  | sdbus-c++ / systemd-logind | Win32 Service API                |
 | HID transport | hidapi (hidraw backend)    | hidapi (Win32 backend)           |
@@ -163,10 +163,11 @@ daemon/
 | `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. |
 | `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
 | `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
-| `HIDTransport.h/.cpp` | `ITransport` implementation for Phase 2. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. |
+| `HIDTransport.h/.cpp` | `ITransport` implementation for Phase 2. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. Unchanged on both platforms. |
 | `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1. Retained for reference. |
 | `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases it immediately after `send()` returns with ACK. |
-| `main.cpp` | Entry point. Constructs `HIDTransport` and `LinuxPowerMonitor`, wires callbacks, sends ON at startup, runs event loop. |
+| `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Runs the daemon as a Windows Service to receive `PBT_APMSUSPEND` (sleep), `PBT_APMRESUMESUSPEND` (wake), and `SERVICE_CONTROL_PRESHUTDOWN` (shutdown) from the SCM. Blocks in the control handler until `send()` returns, achieving the same guarantee as the Linux inhibitor lock. |
+| `main.cpp` | Entry point. Constructs `HIDTransport` and the platform-appropriate power monitor (`LinuxPowerMonitor` or `WindowsPowerMonitor`), wires callbacks, sends ON at startup, runs event loop. |
 
 ---
 
@@ -185,7 +186,7 @@ daemon/
 - Graceful handling when ESP32 is unplugged — daemon starts cleanly, sleep/shutdown
   proceed normally, device is found automatically when next plugged in ✓
 - Confirmed working: sleep, wake, shutdown, boot ✓
-- Windows support for the PC daemon
+- Windows support for the PC daemon ✓
 - Multi-manufacturer TV support (configurable IR codes)
 - Two-way communication: ESP32-initiated PC actions (scope TBD)
 

@@ -10,23 +10,37 @@ set(SOURCES
     src/HIDTransport.cpp
 )
 
-# Linux-specific sources and dependencies.
-# Windows sources and their dependencies will be added here in Phase 2
-# under a corresponding if(WIN32) block.
+# Platform-specific sources and dependencies.
 if(UNIX AND NOT APPLE)
+    # Linux: D-Bus power events via systemd-logind
     list(APPEND SOURCES src/LinuxPowerMonitor.cpp)
     find_package(sdbus-c++ REQUIRED)
+elseif(WIN32)
+    # Windows: power events via the Win32 Service API
+    list(APPEND SOURCES src/WindowsPowerMonitor.cpp)
 endif()
 
-# hidapi is used on all platforms for USB HID communication with the ESP32.
-# hidapi-hidraw uses the Linux hidraw kernel interface directly.
-# On Windows this will use hidapi (Win32 backend) — same API, different backend.
+# hidapi handles USB HID communication on all platforms.
+# The backend differs per OS (hidraw on Linux, Win32 HID API on Windows)
+# but the API is identical — HIDTransport.cpp is unchanged on both.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(HIDAPI REQUIRED hidapi-hidraw)
+if(WIN32)
+    # On Windows, hidapi is found via CMake config or a manual path.
+    # Install hidapi and ensure it is on CMAKE_PREFIX_PATH, e.g.:
+    #   cmake -DCMAKE_PREFIX_PATH=C:/libs/hidapi ..
+    find_package(hidapi REQUIRED)
+else()
+    pkg_check_modules(HIDAPI REQUIRED hidapi-hidraw)
+endif()
 
 add_executable(esp32-ir-daemon ${SOURCES})
 target_include_directories(esp32-ir-daemon PRIVATE src ${HIDAPI_INCLUDE_DIRS})
-target_link_libraries(esp32-ir-daemon PRIVATE ${HIDAPI_LIBRARIES})
+
+if(WIN32)
+    target_link_libraries(esp32-ir-daemon PRIVATE hidapi::hidapi)
+else()
+    target_link_libraries(esp32-ir-daemon PRIVATE ${HIDAPI_LIBRARIES})
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(esp32-ir-daemon PRIVATE SDBusCpp::sdbus-c++)
