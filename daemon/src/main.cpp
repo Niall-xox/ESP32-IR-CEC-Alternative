@@ -1,17 +1,17 @@
-// ESP32 IR Remote — PC Daemon (Phase 1)
+// ESP32 IR Remote — PC Daemon (Phase 2)
 //
 // Monitors system power events and sends ON/OFF commands to the ESP32
-// over USB CDC Serial. Uses a systemd inhibitor lock to delay sleep and
-// shutdown until the IR command has been transmitted.
+// over USB HID. Uses a systemd inhibitor lock to delay sleep and shutdown
+// until the ESP32 confirms the IR signal has been transmitted via ACK.
 //
 // Startup  → send ON  (TV on when PC boots)
-// Sleep    → send OFF (TV off when PC sleeps),   inhibitor lock released after
-// Wake     → send ON  (TV on when PC wakes)
-// Shutdown → send OFF (TV off when PC shuts down), inhibitor lock released after
+// Sleep    → send OFF, wait for ACK, release inhibitor lock
+// Wake     → send ON  (no lock needed — system is already running)
+// Shutdown → send OFF, wait for ACK, release inhibitor lock
 
 #include "IPowerMonitor.h"
 #include "ITransport.h"
-#include "SerialTransport.h"
+#include "HIDTransport.h"
 
 #ifdef __linux__
 #include "LinuxPowerMonitor.h"
@@ -21,19 +21,17 @@
 #include <memory>
 #include <stdexcept>
 
-// Default port used when none is provided on the command line.
-// Phase 2 will replace this with VID/PID auto-detection.
-static constexpr auto DEFAULT_SERIAL_PORT = "/dev/ttyACM0";
+// Must match DEVICE_VID and DEVICE_PID in the firmware.
+// Development placeholder values — replace with a registered VID/PID before
+// commercial release.
+static constexpr uint16_t DEVICE_VID = 0x1234;
+static constexpr uint16_t DEVICE_PID = 0x5678;
 
-int main(int argc, char* argv[]) {
-    // Accept an optional port argument: ./esp32-ir-daemon /dev/ttyACM1
-    const std::string port = (argc > 1) ? argv[1] : DEFAULT_SERIAL_PORT;
-
+int main() {
     // --- Transport ---
     std::unique_ptr<ITransport> transport;
     try {
-        transport = std::make_unique<SerialTransport>(port);
-        std::cout << "[transport] Opened " << port << "\n";
+        transport = std::make_unique<HIDTransport>(DEVICE_VID, DEVICE_PID);
     } catch (const std::exception& e) {
         std::cerr << "[error] " << e.what() << "\n";
         return 1;
@@ -56,26 +54,28 @@ int main(int argc, char* argv[]) {
 #endif
 
     // --- Wire up callbacks ---
+    // send() blocks until ACK is received from the ESP32, so by the time each
+    // callback returns the IR signal has been confirmed transmitted.
+    // LinuxPowerMonitor releases the inhibitor lock immediately after the callback.
     monitor->setOnSleep([&]() {
         transport->send("OFF");
-        std::cout << "[cmd] OFF sent (sleep)\n";
+        std::cout << "[cmd] OFF sent and ACK received (sleep)\n";
     });
 
     monitor->setOnWake([&]() {
         transport->send("ON");
-        std::cout << "[cmd] ON sent (wake)\n";
+        std::cout << "[cmd] ON sent and ACK received (wake)\n";
     });
 
     monitor->setOnShutdown([&]() {
         transport->send("OFF");
-        std::cout << "[cmd] OFF sent (shutdown)\n";
+        std::cout << "[cmd] OFF sent and ACK received (shutdown)\n";
     });
 
     // Send ON at startup — the service starting means the PC just booted.
     transport->send("ON");
-    std::cout << "[cmd] ON sent (startup)\n";
+    std::cout << "[cmd] ON sent and ACK received (startup)\n";
 
-    // --- Run ---
     // Blocks here until the process is killed by systemd on shutdown.
     std::cout << "[sys] Daemon running\n";
     monitor->run();

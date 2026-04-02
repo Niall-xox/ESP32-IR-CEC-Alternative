@@ -1,17 +1,16 @@
 #include "LinuxPowerMonitor.h"
 
-#include <chrono>
 #include <iostream>
-#include <thread>
 
 // logind D-Bus coordinates
 static constexpr auto LOGIND_SERVICE   = "org.freedesktop.login1";
 static constexpr auto LOGIND_OBJECT    = "/org/freedesktop/login1";
 static constexpr auto LOGIND_INTERFACE = "org.freedesktop.login1.Manager";
 
-// How long to wait after sending the IR command before releasing the inhibitor lock.
-// The firmware fires IR in under 200ms; 500ms gives a comfortable margin.
-static constexpr auto INHIBITOR_RELEASE_DELAY = std::chrono::milliseconds(500);
+// Phase 1 used a fixed 500ms delay here before releasing the inhibitor lock.
+// Phase 2 removes this — HIDTransport::send() blocks until ACK is received from
+// the ESP32, which is sent only after sendNEC() completes. The lock is released
+// immediately after send() returns, with no blind delay required.
 
 LinuxPowerMonitor::LinuxPowerMonitor() {
     // Connect to the system bus — logind lives here, not the session bus
@@ -89,13 +88,13 @@ void LinuxPowerMonitor::releaseInhibitorLock() {
 void LinuxPowerMonitor::onPrepareForSleep(bool start) {
     if (start) {
         std::cout << "[event] Going to sleep\n";
-        if (onSleep_) onSleep_();
-        std::this_thread::sleep_for(INHIBITOR_RELEASE_DELAY);
+        // Always release the inhibitor lock even if the callback fails (e.g. ESP32
+        // not plugged in) — the system must not be blocked from sleeping.
+        try { if (onSleep_) onSleep_(); } catch (...) {}
         releaseInhibitorLock();
-        // systemd now proceeds with sleep
     } else {
         std::cout << "[event] Woke up\n";
-        if (onWake_) onWake_();
+        try { if (onWake_) onWake_(); } catch (...) {}
         takeInhibitorLock();  // re-take ready for the next sleep event
     }
 }
@@ -103,10 +102,10 @@ void LinuxPowerMonitor::onPrepareForSleep(bool start) {
 void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
     if (start) {
         std::cout << "[event] Shutting down\n";
-        if (onShutdown_) onShutdown_();
-        std::this_thread::sleep_for(INHIBITOR_RELEASE_DELAY);
+        // Always release the inhibitor lock even if the callback fails — the
+        // system must not be blocked from shutting down.
+        try { if (onShutdown_) onShutdown_(); } catch (...) {}
         releaseInhibitorLock();
-        // Don't re-take — the system is going down
     }
     // start = false means shutdown was cancelled; no action needed
 }

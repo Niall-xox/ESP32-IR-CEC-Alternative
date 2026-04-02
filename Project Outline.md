@@ -23,9 +23,9 @@ robust and network-independent.
 
 ## Hardware
 
-- **ESP32 board** — microcontroller running the firmware
+- **ESP32-S3 SuperMini** — microcontroller running the firmware
 - **IR LED** — transmits IR signals to the TV
-- **OLED display (128×32)** — provides status feedback and debug output
+- **OLED display (128×32, SSD1306)** — provides status feedback
 
 ---
 
@@ -44,15 +44,14 @@ ESP32 over USB. Written in C++17 for cross-platform portability.
   `org.freedesktop.login1`.
 - Takes a **delay inhibitor lock** before sleep/shutdown to guarantee the IR
   command is transmitted before the system suspends or powers off. The lock is
-  released once the daemon confirms the command has been dispatched (see
-  Communication Protocol below for per-phase details).
+  released only after the ESP32 sends ACK, confirming the IR signal has fired.
 - Startup detection: handled by the systemd service starting at boot.
 - Wake detection: handled by `PrepareForSleep(false)` — emitted after resume.
   No lock is needed on wake as the system is already running.
 
 ### ESP32 Firmware
-Receives commands from the PC over USB, transmits the appropriate IR signal, and
-updates the OLED display.
+Receives commands from the PC over USB HID, transmits the appropriate IR signal,
+updates the OLED display, and sends ACK or ERR back to the daemon.
 
 **IR Codes (LG NEC protocol, confirmed on LG C2):**
 - Power ON:  `0x20DF23DC` (discrete — confirmed working on LG C2)
@@ -70,32 +69,39 @@ correct TV state regardless of any prior state drift.
 - `Waiting...` — idle, no command received
 - `TV On` — ON command sent
 - `TV Off` — OFF command sent
-- Error states (for debugging):
-  - `IR Init Failed`
-  - `OLED Init Failed`
-  - `Serial Err`
+- `HID Err` — unknown command received
 
 ---
 
 ## Communication Protocol
 
-### Phase 1 (MVP) — One-way, fixed delay
+### Phase 1 (complete) — One-way, fixed delay
 - Transport: USB CDC Serial at 115200 baud
 - Daemon → ESP32 commands: `ON\n`, `OFF\n`
 - No response from ESP32
-- After sending a command, the daemon waits a fixed delay (~500ms) before
-  releasing the inhibitor lock. This is sufficient given that serial
-  transmission and IR firing complete in well under 200ms.
+- Daemon waited a fixed 500ms delay before releasing the inhibitor lock.
 
-### Phase 2 (Final Product) — Two-way, ACK-based
-- Transport: USB HID
-- Daemon → ESP32 commands: `ON\n`, `OFF\n` (and any future commands)
-- ESP32 → Daemon responses: `ACK\n` on success, `ERR\n` on failure
-- The daemon releases the inhibitor lock only after receiving `ACK\n`,
-  eliminating the fixed delay and confirming the IR signal was actually fired.
-- Two-way communication also enables ESP32-initiated events (e.g. a hardware
-  button on the device triggering an action on the PC). The scope of these
-  features is to be defined as Phase 2 develops.
+### Phase 2 (current) — Two-way, ACK-based
+- Transport: USB HID (64-byte vendor-defined reports)
+- Daemon → ESP32: 64-byte output report, command string in first bytes (`ON` / `OFF`)
+- ESP32 → Daemon: 64-byte input report, `ACK` on success or `ERR` on unknown command
+- `sendNEC()` is synchronous — ACK is sent only after the IR signal has fully
+  transmitted, so the daemon releases its inhibitor lock the instant it receives ACK.
+- No fixed delays anywhere in the pipeline.
+
+### USB Device Identity
+The ESP32 presents as a vendor-defined HID device identified by VID/PID.
+The daemon finds the device by these IDs — no port numbers or paths involved.
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| VID   | `0x1234` | Placeholder — replace with registered ID before commercial release |
+| PID   | `0x5678` | Placeholder — replace with registered ID before commercial release |
+| Product name | `ESP32 IR Remote` | Shown in system device list |
+| Manufacturer | `ESP32-IR-CEC` | Shown in system device list |
+
+For open-source release, a free registered VID/PID pair can be obtained from
+[pid.codes](https://pid.codes). For commercial release, a USB-IF VID is required.
 
 ---
 
@@ -105,7 +111,7 @@ The daemon is structured to support multiple platforms without rewriting core
 logic. Two platform-specific concerns are isolated behind abstract interfaces:
 
 ```
-IPowerMonitor   — raises OnSleep, OnWake, OnShutdown, OnStartup events
+IPowerMonitor   — raises OnSleep, OnWake, OnShutdown events
 ITransport      — send(const std::string& cmd)
 ```
 
@@ -114,27 +120,23 @@ compiled in or out by CMake based on the target OS.
 
 ### Platform implementation map
 
-| Concern          | Linux                        | Windows (Phase 2)            |
-|------------------|------------------------------|------------------------------|
-| Power events     | sdbus-c++ / systemd-logind   | Win32 Service API            |
-| Serial port      | POSIX (`open`/`write`)       | Win32 (`CreateFile`/`WriteFile`) |
-| Device discovery | libudev (Phase 2)            | SetupAPI (Phase 2)           |
-| Build system     | CMake                        | CMake                        |
+| Concern       | Linux                      | Windows (Phase 2)                |
+|---------------|----------------------------|----------------------------------|
+| Power events  | sdbus-c++ / systemd-logind | Win32 Service API                |
+| HID transport | hidapi (hidraw backend)    | hidapi (Win32 backend)           |
+| Build system  | CMake                      | CMake                            |
+
+Note: hidapi is cross-platform — the same `HIDTransport` implementation works on
+both Linux and Windows. Only `IPowerMonitor` needs a platform-specific implementation.
 
 ### Build system
 CMake is used as the build system. It generates the appropriate native build
 files per platform (Makefiles on Linux, Visual Studio/Ninja on Windows) from a
 single `CMakeLists.txt`. Platform-specific source files and dependencies are
-included or excluded via CMake `if(LINUX)` / `if(WIN32)` conditionals, so no
-manual changes are needed when building on a different OS.
+included or excluded via CMake conditionals.
 
 ### Language standard
 The daemon targets **C++17**, which is fully supported by GCC, Clang, and MSVC.
-
-### No cross-platform serial library required
-Since serial communication is simple (fire-and-forget string writes), no
-third-party cross-platform serial library is needed. The `ITransport`
-abstraction contains the platform difference to a single implementation file.
 
 ---
 
@@ -148,50 +150,44 @@ daemon/
     main.cpp
     IPowerMonitor.h
     ITransport.h
+    HIDTransport.h / .cpp
     LinuxPowerMonitor.h / .cpp
-    SerialTransport.h / .cpp
+    SerialTransport.h / .cpp     (Phase 1 — retained for reference)
 ```
 
 ### File summaries
 
 | File | Purpose |
 |------|---------|
-| `CMakeLists.txt` | Build configuration. Declares source files, C++17 standard, and platform-conditional dependencies. On Linux, pulls in sdbus-c++. Windows sources will be added here in Phase 2. |
-| `esp32-ir-remote.service` | systemd unit file. Starts the daemon at boot after logind is ready, restarts it on failure. |
-| `ITransport.h` | Abstract interface for sending commands to the ESP32 (`send(cmd)`). Isolates transport details so `main.cpp` is unaffected when Serial is swapped for HID in Phase 2. |
-| `IPowerMonitor.h` | Abstract interface for receiving power events. Callers register callbacks for sleep/wake/shutdown and call `run()`. Isolates OS-specific event handling so `main.cpp` is unaffected when the Linux implementation is joined by a Windows one in Phase 2. |
-| `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1. Opens the serial port with POSIX `open()`, configures 115200 8N1 via `termios`, writes commands as `cmd\n`. |
-| `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. Connects to systemd-logind over D-Bus via sdbus-c++, subscribes to `PrepareForSleep` and `PrepareForShutdown` signals, manages the delay inhibitor lock, and fires the registered callbacks at the appropriate moment. |
-| `main.cpp` | Entry point. Constructs `SerialTransport` and `LinuxPowerMonitor`, wires the callbacks (sleep/shutdown → OFF, wake → ON), sends ON at startup, then calls `monitor->run()` which blocks until the process is killed. |
+| `CMakeLists.txt` | Build configuration. C++17, hidapi on all platforms, sdbus-c++ on Linux. |
+| `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. |
+| `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
+| `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
+| `HIDTransport.h/.cpp` | `ITransport` implementation for Phase 2. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. |
+| `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1. Retained for reference. |
+| `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases it immediately after `send()` returns with ACK. |
+| `main.cpp` | Entry point. Constructs `HIDTransport` and `LinuxPowerMonitor`, wires callbacks, sends ON at startup, runs event loop. |
 
 ---
 
 ## Roadmap
 
-### Phase 1 — Minimum Viable Product
-Validates the core IR control loop before full platform support is added.
+### Phase 1 — Minimum Viable Product ✓
+- Firmware: USB CDC Serial, receives ON/OFF, fires IR, updates OLED ✓
+- Daemon: D-Bus logind listener, fixed-delay inhibitor lock release ✓
+- Confirmed working: sleep, wake, shutdown ✓
 
-**Constraints:**
-- Linux only (Arch Linux)
-- LG TVs only
-- Hardware: ESP32-S3 SuperMini
-- Communication: USB CDC Serial (fixed port, e.g. `/dev/ttyACM0`)
-
-**Deliverables:**
-- Firmware: receives `ON`/`OFF` over Serial, sends IR, updates OLED ✓
-- Daemon: systemd-logind D-Bus listener, fixed-delay inhibitor lock release
-- systemd service unit for the daemon
-
-### Phase 2 — Final Product
-Expands platform and hardware support. Scope is partially in flux.
-
-**Planned additions:**
+### Phase 2 — Final Product (in progress)
+- USB HID communication with ACK-based lock release ✓
+- Device discovery by VID/PID — no hardcoded port numbers ✓
+- Firmware: sends ACK after IR confirmed transmitted ✓
+- Daemon installed as systemd service — starts at boot, restarts on failure ✓
+- Graceful handling when ESP32 is unplugged — daemon starts cleanly, sleep/shutdown
+  proceed normally, device is found automatically when next plugged in ✓
+- Confirmed working: sleep, wake, shutdown, boot ✓
 - Windows support for the PC daemon
 - Multi-manufacturer TV support (configurable IR codes)
-- USB HID communication with ACK-based lock release
-- Auto-detection of the ESP32 device by USB VID/PID
-- Two-way communication channel enabling ESP32-initiated PC actions
-  (e.g. hardware buttons on the device — specific features TBD)
+- Two-way communication: ESP32-initiated PC actions (scope TBD)
 
 ---
 
@@ -204,10 +200,12 @@ Expands platform and hardware support. Scope is partially in flux.
 
 ### PC Daemon
 - **Build:** CMake
+- **All platforms:** `hidapi` — USB HID communication
 - **Linux:** `sdbus-c++` — D-Bus communication with systemd-logind
-- **Windows (Phase 2):** Win32 API only, no extra dependencies
+- **Windows (Phase 2):** Win32 API only, no extra dependencies beyond hidapi
 
 ---
 
 ## Open Questions
 - Define Phase 2 ESP32-initiated features (hardware buttons, etc.).
+- Assign registered VID/PID before any public or commercial release.
