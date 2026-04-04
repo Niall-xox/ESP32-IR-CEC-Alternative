@@ -177,4 +177,9 @@ void loop() {
     }
 
     device.send(response);
+
+    // Brief confirmation display, then return to idle state.
+    // The ACK is already sent above so this delay does not affect the daemon.
+    delay(5000);
+    oledShow("Waiting...");
 }
