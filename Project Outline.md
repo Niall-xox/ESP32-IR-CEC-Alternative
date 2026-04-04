@@ -135,6 +135,35 @@ files per platform (Makefiles on Linux, Visual Studio/Ninja on Windows) from a
 single `CMakeLists.txt`. Platform-specific source files and dependencies are
 included or excluded via CMake conditionals.
 
+On Windows, hidapi is provided via **vcpkg** and found with `find_package(hidapi CONFIG)`.
+PkgConfig is not used on Windows — it is guarded behind the Linux branch.
+The vcpkg target is `hidapi::winapi` (not `hidapi::hidapi`).
+The include path requires the parent of the vcpkg include directory, derived at
+configure time via `cmake_path(GET ... PARENT_PATH ...)`.
+
+#### Linux build
+```
+cmake -B daemon/build -S daemon
+cmake --build daemon/build
+```
+
+#### Windows build (requires Visual Studio Build Tools + vcpkg + hidapi)
+```
+cmake -B daemon/build -S daemon -G "Visual Studio 17 2022" -A x64 \
+      -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake \
+      -DVCPKG_TARGET_TRIPLET=x64-windows
+cmake --build daemon/build --config Release
+```
+
+#### Windows prerequisites (one-time)
+```
+winget install Microsoft.VisualStudio.2022.BuildTools
+winget install Kitware.CMake
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+C:\vcpkg\vcpkg install hidapi:x64-windows
+```
+
 ### Language standard
 The daemon targets **C++17**, which is fully supported by GCC, Clang, and MSVC.
 
@@ -152,6 +181,7 @@ daemon/
     ITransport.h
     HIDTransport.h / .cpp
     LinuxPowerMonitor.h / .cpp
+    WindowsPowerMonitor.h / .cpp
     SerialTransport.h / .cpp     (Phase 1 — retained for reference)
 ```
 

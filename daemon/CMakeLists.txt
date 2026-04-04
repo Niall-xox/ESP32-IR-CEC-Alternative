@@ -23,13 +23,21 @@ endif()
 # hidapi handles USB HID communication on all platforms.
 # The backend differs per OS (hidraw on Linux, Win32 HID API on Windows)
 # but the API is identical — HIDTransport.cpp is unchanged on both.
-find_package(PkgConfig REQUIRED)
 if(WIN32)
-    # On Windows, hidapi is found via CMake config or a manual path.
-    # Install hidapi and ensure it is on CMAKE_PREFIX_PATH, e.g.:
-    #   cmake -DCMAKE_PREFIX_PATH=C:/libs/hidapi ..
-    find_package(hidapi REQUIRED)
+    # hidapi is provided via vcpkg. Build with:
+    #   cmake -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+    #         -DVCPKG_TARGET_TRIPLET=x64-windows
+    # vcpkg provides hidapi::winapi (Win32 HID backend) and hidapi::include.
+    # PkgConfig is not used on Windows — it is not available there.
+    find_package(hidapi CONFIG REQUIRED)
+
+    # vcpkg places headers in .../include/hidapi/, but HIDTransport.h includes
+    # "hidapi/hidapi.h", which requires the parent .../include/ on the path.
+    # Derive it from the target property rather than hardcoding a path.
+    get_target_property(_hidapi_inc hidapi::include INTERFACE_INCLUDE_DIRECTORIES)
+    cmake_path(GET _hidapi_inc PARENT_PATH HIDAPI_INCLUDE_DIRS)
 else()
+    find_package(PkgConfig REQUIRED)
     pkg_check_modules(HIDAPI REQUIRED hidapi-hidraw)
 endif()
 
@@ -37,7 +45,7 @@ add_executable(esp32-ir-daemon ${SOURCES})
 target_include_directories(esp32-ir-daemon PRIVATE src ${HIDAPI_INCLUDE_DIRS})
 
 if(WIN32)
-    target_link_libraries(esp32-ir-daemon PRIVATE hidapi::hidapi)
+    target_link_libraries(esp32-ir-daemon PRIVATE hidapi::winapi)
 else()
     target_link_libraries(esp32-ir-daemon PRIVATE ${HIDAPI_LIBRARIES})
 endif()
