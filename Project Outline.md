@@ -24,8 +24,9 @@ robust and network-independent.
 ## Hardware
 
 - **ESP32-S3 SuperMini** — microcontroller running the firmware
-- **IR LED** — transmits IR signals to the TV
-- **OLED display (128×32, SSD1306)** — provides status feedback
+- **IR LED** — transmits IR signals to the TV (GPIO 4)
+- **OLED display (128×32, SSD1306)** — provides status feedback (SDA: GPIO 2, SCL: GPIO 3)
+- **Tactile button** — profile cycling, config mode, factory reset (GPIO 5, GND)
 
 ---
 
@@ -50,26 +51,9 @@ ESP32 over USB. Written in C++17 for cross-platform portability.
   No lock is needed on wake as the system is already running.
 
 ### ESP32 Firmware
-Receives commands from the PC over USB HID, transmits the appropriate IR signal,
-updates the OLED display, and sends ACK or ERR back to the daemon.
-
-**IR Codes (LG NEC protocol, confirmed on LG C2):**
-- Power ON:  `0x20DF23DC` (discrete — confirmed working on LG C2)
-- Power OFF: `0x20DFA35C` (discrete — confirmed working on LG C2)
-- Power Toggle: `0x20DF10EF` (fallback for other models)
-
-Note: `0x20DFB34C` was also tested as a candidate ON code but triggers LG's
-smart TV network prompt on the C2 — it maps to a "Smart Home" power-on mode
-rather than a plain power-on.
-
-Discrete on/off codes are preferred over the toggle code, as they guarantee the
-correct TV state regardless of any prior state drift.
-
-**OLED display states:**
-- `Waiting...` — idle, no command received
-- `TV On` — shown for 5 seconds after ON command, then reverts to `Waiting...`
-- `TV Off` — shown for 5 seconds after OFF command, then reverts to `Waiting...`
-- `HID Err` — shown for 5 seconds after unknown command, then reverts to `Waiting...`
+Receives commands from the PC over USB HID, transmits the appropriate IR signal
+for the active manufacturer profile, updates the OLED display, and sends ACK or
+ERR back to the daemon.
 
 ---
 
@@ -83,8 +67,16 @@ correct TV state regardless of any prior state drift.
 
 ### Phase 2 (current) — Two-way, ACK-based
 - Transport: USB HID (64-byte vendor-defined reports)
-- Daemon → ESP32: 64-byte output report, command string in first bytes (`ON` / `OFF`)
-- ESP32 → Daemon: 64-byte input report, `ACK` on success or `ERR` on unknown command
+- Daemon → ESP32: 64-byte output report, command string in first bytes
+- ESP32 → Daemon: 64-byte input report, response string in first bytes
+
+| Command (Daemon → ESP32) | Response (ESP32 → Daemon) | Action |
+|--------------------------|---------------------------|--------|
+| `ON`  | `ACK` | Fire IR ON code for active profile |
+| `OFF` | `ACK` | Fire IR OFF code for active profile |
+| `ON` / `OFF` (unknown cmd) | `ERR` | Unknown command received |
+| `PING` | `PONG` | Daemon liveness check, triggered by button press |
+
 - `sendNEC()` is synchronous — ACK is sent only after the IR signal has fully
   transmitted, so the daemon releases its inhibitor lock the instant it receives ACK.
 - No fixed delays anywhere in the pipeline.
@@ -102,6 +94,190 @@ The daemon finds the device by these IDs — no port numbers or paths involved.
 
 For open-source release, a free registered VID/PID pair can be obtained from
 [pid.codes](https://pid.codes). For commercial release, a USB-IF VID is required.
+
+---
+
+## Manufacturer Profiles
+
+IR codes are stored per-profile in `/profiles.json` on LittleFS. Each profile contains:
+- `name` — display name (e.g. `LG`, `Samsung`)
+- `protocol` — IR protocol (e.g. `NEC`, `SAMSUNG`, `SONY`)
+- `on_code` — discrete power on code
+- `off_code` — discrete power off code
+- `visible` — whether the profile appears in the button cycle
+
+Discrete on/off codes are preferred over toggle codes, as they guarantee the
+correct TV state regardless of any prior state drift.
+
+### Default profiles (hardcoded in firmware, written to LittleFS on first boot)
+
+| Profile  | Protocol | ON Code      | OFF Code     | Notes |
+|----------|----------|--------------|--------------|-------|
+| LG       | NEC      | `0x20DF23DC` | `0x20DFA35C` | Confirmed working on LG C2 |
+| Samsung  | SAMSUNG  | placeholder  | placeholder  | |
+| Sony     | SONY     | placeholder  | placeholder  | |
+| TCL      | NEC      | placeholder  | placeholder  | |
+| Hisense  | NEC      | placeholder  | placeholder  | |
+
+Note: `0x20DFB34C` was tested as an LG ON code but triggers a smart TV network
+prompt on the C2 — it maps to a smart home power-on mode, not plain power-on.
+
+Custom profiles can be added via the web UI and are also stored in `/profiles.json`.
+Factory reset rewrites `/profiles.json` from the hardcoded defaults above.
+
+---
+
+## Button & Display Behaviour
+
+### Button (GPIO 5)
+- Press defined as release within 300ms of press
+- Hold defined as button held beyond 300ms
+
+### Normal Operation — Display Always On Disabled (default)
+
+**Press 1 (display off):**
+- Display turns on
+- PING sent to daemon
+- Shows:
+  ```
+  Profile: LG
+  Daemon: Waiting...
+  ```
+- Updates to `Daemon: Connected` on PONG, or `Daemon: Not Found` on timeout
+- 2 second timer starts, display turns off after
+
+**Press 2 (display on, within timer):**
+- Cycle to next visible profile, reset 2 second timer
+
+**IR command received:**
+- Display turns on showing `TV On` or `TV Off`
+- Turns off after 2 seconds
+
+### Normal Operation — Display Always On Enabled
+
+**Display:** OLED on continuously showing:
+```
+Profile: LG
+Daemon: Connected
+```
+
+**Press 1:**
+- PING sent
+- `Daemon: Waiting...` updates to `Connected` or `Not Found`
+
+**Press 2:**
+- Cycle to next visible profile
+
+**IR command received:**
+- Display shows `TV On` or `TV Off`
+- After 2 seconds returns to status screen
+
+### Hold Behaviour (both normal operation modes)
+
+- **300ms:** progress bar appears at bottom, text above:
+  ```
+  Enter Wireless Config Mode?
+  [▓▓░░░]  ← 5 blocks, 1 per second
+  ```
+- **5s:** bar full → text changes to:
+  ```
+  Release To Enter
+  Wireless Config!
+  ```
+- **Released at 5s:** enter wireless config mode
+- **Held past 5s, at 8s:** factory reset screen:
+  ```
+  Hold To Factory Reset
+  [▓▓▓░░░░░░░░░░░░░░░░░]  ← 15 segments, 1 per second
+  ```
+- **Held to 23s:** factory reset triggers automatically, no release needed
+
+### Wireless Config Mode Active
+
+**Display:** OLED on continuously (always, cannot be disabled):
+```
+Profile: LG
+Daemon: Connected
+WiFi: Active
+```
+
+**Press 1:**
+- PING sent
+- `Daemon: Waiting...` updates to `Connected` or `Not Found`
+
+**Press 2:**
+- Display shows for 2 seconds:
+  ```
+  Hold Button to Exit
+  Wireless Mode to
+  Switch Profiles
+  ```
+- Reverts to status screen
+
+**Hold behaviour:**
+- **300ms:** progress bar appears, text:
+  ```
+  Exit Wireless Config Mode?
+  [▓▓░░░]  ← 5 blocks, 1 per second
+  ```
+- **5s:** bar full → text changes to:
+  ```
+  Release To Exit
+  Wireless Config!
+  ```
+- **Released at 5s:** exit wireless config mode, return to normal operation
+- **Held past 5s, at 8s:** factory reset screen, same as above
+- **Held to 23s:** factory reset triggers automatically
+
+**Exit via web UI:**
+- `Save and Exit` button → exits wireless config mode, returns to normal operation
+
+---
+
+## Web UI (accessed via `192.168.4.1` when wireless config mode is active)
+
+Hosted on LittleFS alongside `/profiles.json` and `/settings.json`.
+
+### Profile Management
+- View all profiles
+- Select active profile
+- Add new profile (name, protocol, ON code, OFF code)
+- Edit existing profile
+- Delete profile
+- Show/hide profile from button cycle
+
+### Settings
+- Display always on toggle (applies to normal operation only)
+
+### Actions
+- **Save** — saves current settings without exiting wireless mode
+- **Restore** — reverts to last saved config (discards unsaved changes)
+- **Factory Reset** — rewrites all profiles and settings from hardcoded defaults
+- **Save and Exit** — saves and exits wireless config mode
+
+---
+
+## Storage (LittleFS)
+
+### `/profiles.json`
+Array of profile objects. Written from hardcoded defaults on first boot.
+```json
+[
+  { "name": "LG", "protocol": "NEC", "on": "0x20DF23DC", "off": "0x20DFA35C", "visible": true },
+  ...
+]
+```
+
+### `/settings.json`
+Device settings. Written from hardcoded defaults on first boot.
+```json
+{
+  "active_profile": 0,
+  "display_always_on": false
+}
+```
+
+Factory reset rewrites both files from hardcoded defaults.
 
 ---
 
@@ -172,6 +348,11 @@ The daemon targets **C++17**, which is fully supported by GCC, Clang, and MSVC.
 ## File Structure
 
 ```
+firmware/
+  platformio.ini
+  src/
+    main.cpp
+
 daemon/
   CMakeLists.txt
   esp32-ir-remote.service
@@ -185,7 +366,7 @@ daemon/
     SerialTransport.h / .cpp     (Phase 1 — retained for reference)
 ```
 
-### File summaries
+### Daemon file summaries
 
 | File | Purpose |
 |------|---------|
@@ -193,11 +374,11 @@ daemon/
 | `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. |
 | `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
 | `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
-| `HIDTransport.h/.cpp` | `ITransport` implementation for Phase 2. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. Unchanged on both platforms. |
+| `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. Unchanged on both platforms. |
 | `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1. Retained for reference. |
-| `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases it immediately after `send()` returns with ACK. |
-| `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Runs the daemon as a Windows Service to receive `PBT_APMSUSPEND` (sleep), `PBT_APMRESUMESUSPEND` (wake), and `SERVICE_CONTROL_PRESHUTDOWN` (shutdown) from the SCM. Blocks in the control handler until `send()` returns, achieving the same guarantee as the Linux inhibitor lock. |
-| `main.cpp` | Entry point. Constructs `HIDTransport` and the platform-appropriate power monitor (`LinuxPowerMonitor` or `WindowsPowerMonitor`), wires callbacks, sends ON at startup, runs event loop. |
+| `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases after ACK. |
+| `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Win32 Service API, blocks in control handler until ACK received. |
+| `main.cpp` | Entry point. Constructs transport and platform-appropriate power monitor, wires callbacks, sends ON at startup, runs event loop. |
 
 ---
 
@@ -208,17 +389,22 @@ daemon/
 - Daemon: D-Bus logind listener, fixed-delay inhibitor lock release ✓
 - Confirmed working: sleep, wake, shutdown ✓
 
-### Phase 2 — Final Product (in progress)
+### Phase 2 — USB HID + Cross Platform ✓
 - USB HID communication with ACK-based lock release ✓
 - Device discovery by VID/PID — no hardcoded port numbers ✓
 - Firmware: sends ACK after IR confirmed transmitted ✓
 - Daemon installed as systemd service — starts at boot, restarts on failure ✓
-- Graceful handling when ESP32 is unplugged — daemon starts cleanly, sleep/shutdown
-  proceed normally, device is found automatically when next plugged in ✓
-- Confirmed working: sleep, wake, shutdown, boot ✓
-- Windows support for the PC daemon ✓
-- Multi-manufacturer TV support (configurable IR codes)
-- Two-way communication: ESP32-initiated PC actions (scope TBD)
+- Graceful handling when ESP32 is unplugged ✓
+- Confirmed working: sleep, wake, shutdown, boot on Linux and Windows ✓
+- Windows daemon support confirmed working ✓
+
+### Phase 3 — Multi-Profile, Button, WiFi Config (in progress)
+- Physical button (GPIO 5): profile cycling, config mode, factory reset
+- Multi-manufacturer IR profile support stored on LittleFS as JSON
+- WiFi AP config mode with web UI at `192.168.4.1`
+- PING/PONG daemon liveness detection
+- Display always-on setting
+- Factory reset via button hold or web UI
 
 ---
 
@@ -228,15 +414,18 @@ daemon/
 - `adafruit/Adafruit SSD1306`
 - `adafruit/Adafruit GFX Library`
 - `crankyoldgit/IRremoteESP8266`
+- `bblanchon/ArduinoJson` — JSON read/write for LittleFS profiles and settings
+- ESP32 built-ins: `WiFi`, `WebServer`, `LittleFS`, `Preferences`
 
 ### PC Daemon
 - **Build:** CMake
 - **All platforms:** `hidapi` — USB HID communication
 - **Linux:** `sdbus-c++` — D-Bus communication with systemd-logind
-- **Windows (Phase 2):** Win32 API only, no extra dependencies beyond hidapi
+- **Windows:** Win32 API only, no extra dependencies beyond hidapi
 
 ---
 
 ## Open Questions
-- Define Phase 2 ESP32-initiated features (hardware buttons, etc.).
-- Assign registered VID/PID before any public or commercial release.
+- Confirm working discrete IR codes for Samsung, Sony, TCL, Hisense
+- Assign registered VID/PID before any public or commercial release
+- Two-way communication (ESP32-initiated PC actions) — deferred to future phase
