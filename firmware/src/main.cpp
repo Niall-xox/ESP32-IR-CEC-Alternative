@@ -170,9 +170,11 @@ void onButtonPress() {
             // First press in WiFi mode: PING and refresh status screen
             pingDaemon(true);  // alwaysOn=true in WiFi mode
         } else {
-            // Second press in WiFi mode: show lock message, reset counter
+            // Second press and beyond in WiFi mode: show lock message.
+            // pressCount stays at 1 so further presses keep showing the message
+            // rather than triggering another PING.
             display.showWifiLockMessage();
-            pressCount = 0;
+            pressCount = 1;
         }
         return;
     }
@@ -185,13 +187,16 @@ void onButtonPress() {
         // pressCount stays at 1 until the timer fires onExpire (which resets to 0)
         // or the user presses again (which increments to 2).
     } else {
-        // Second press: cycle to next visible profile and refresh display
+        // Second press and beyond: cycle to next visible profile and refresh display.
+        // pressCount stays at 1 (not reset to 0) so further presses keep cycling
+        // without triggering another PING. It resets to 0 only when the display
+        // turns off (via onExpire).
         int next = Profiles::nextVisibleIndex();
         Profiles::getMutableSettings().activeProfile = next;
         Profiles::saveSettings();
 
         display.showStatus(Profiles::getActive().name, display.getDaemonStatus(), alwaysOn);
-        pressCount = 0;
+        pressCount = 1;
     }
 }
 
@@ -200,7 +205,11 @@ void onButtonHold(uint32_t heldMs) {
     pressCount = 0;
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
 
-    if (heldMs >= 8000) {
+    if (heldMs >= 23000) {
+        // Factory reset has already triggered — stop updating the display so
+        // the status screen drawn by onFactoryReset is not overwritten
+        return;
+    } else if (heldMs >= 8000) {
         display.showResetBar(heldMs);
     } else if (heldMs >= 5000) {
         display.showConfigRelease(!wifiActive);
@@ -218,7 +227,8 @@ void onConfigThreshold() {
     // WiFi start/stop implemented in step 6 — toggle is wired, AP not started yet
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
     display.showStatus(Profiles::getActive().name, display.getDaemonStatus(), alwaysOn);
-    pressCount = 0;
+    // Display is now on — next press should cycle profiles, not ping
+    pressCount = 1;
 }
 
 void onFactoryReset() {
@@ -226,9 +236,10 @@ void onFactoryReset() {
     Profiles::factoryReset();
     wifiActive = false;
     display.setWifiActive(false);
-    pressCount = 0;
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
     display.showStatus(Profiles::getActive().name, DaemonStatus::Unknown, alwaysOn);
+    // Display is now on — next press should cycle profiles, not ping
+    pressCount = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +258,14 @@ void setup() {
     button.begin();
     button.onPress           = onButtonPress;
     button.onHold            = onButtonHold;
+    button.onHoldCancelled   = []() {
+        // Bar was filling but button released before 5s — show status screen.
+        // Set pressCount to 1 so the next press cycles the profile rather than
+        // triggering another PING (the daemon was already pinged on the initial press).
+        bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
+        display.showStatus(Profiles::getActive().name, display.getDaemonStatus(), alwaysOn);
+        pressCount = 1;
+    };
     button.onConfigThreshold = onConfigThreshold;
     button.onFactoryReset    = onFactoryReset;
 

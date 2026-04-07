@@ -23,6 +23,7 @@ public:
     std::function<void()> onPress;        // Button released within 300ms
     std::function<void(uint32_t)> onHold; // Called every update() while held past 300ms,
                                           // with ms held as argument — use for progress bars
+    std::function<void()> onHoldCancelled;     // Released during hold phase before config threshold
     std::function<void()> onConfigThreshold;   // Held to 5s and released
     std::function<void()> onFactoryReset;      // Held to 23s (fires automatically)
 

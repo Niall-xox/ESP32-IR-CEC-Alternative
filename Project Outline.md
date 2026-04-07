@@ -133,6 +133,11 @@ Factory reset rewrites `/profiles.json` from the hardcoded defaults above.
 - Press defined as release within 300ms of press
 - Hold defined as button held beyond 300ms
 
+### PING rule
+PING is only sent on the **first button press after the display was off**. Once the display is on (for any reason — button wake, config toggle, factory reset, hold cancel), all subsequent presses cycle profiles without pinging. The display turning off resets this so the next press pings again.
+
+Exception: in always-on mode the display never turns off, so the same rule applies — first press after the display last updated pings, subsequent presses cycle.
+
 ### Normal Operation — Display Always On Disabled (default)
 
 **Press 1 (display off):**
@@ -146,8 +151,9 @@ Factory reset rewrites `/profiles.json` from the hardcoded defaults above.
 - Updates to `Daemon: Connected` on PONG, or `Daemon: Not Found` on timeout
 - 2 second timer starts, display turns off after
 
-**Press 2 (display on, within timer):**
+**Press 2+ (display on, within timer):**
 - Cycle to next visible profile, reset 2 second timer
+- No PING sent
 
 **IR command received:**
 - Display turns on showing `TV On` or `TV Off`
@@ -165,8 +171,8 @@ Daemon: Connected
 - PING sent
 - `Daemon: Waiting...` updates to `Connected` or `Not Found`
 
-**Press 2:**
-- Cycle to next visible profile
+**Press 2+:**
+- Cycle to next visible profile, no PING
 
 **IR command received:**
 - Display shows `TV On` or `TV Off`
@@ -179,18 +185,22 @@ Daemon: Connected
   Enter Wireless Config Mode?
   [▓▓░░░]  ← 5 blocks, 1 per second
   ```
+- **Released before 5s:** status screen shown, next press cycles (no PING)
 - **5s:** bar full → text changes to:
   ```
   Release To Enter
   Wireless Config!
   ```
-- **Released at 5s:** enter wireless config mode
+- **Released at 5s–8s:** enter wireless config mode, status screen shown
 - **Held past 5s, at 8s:** factory reset screen:
   ```
   Hold To Factory Reset
   [▓▓▓░░░░░░░░░░░░░░░░░]  ← 15 segments, 1 per second
   ```
-- **Held to 23s:** factory reset triggers automatically, no release needed
+- **Released during reset bar (8s–23s):** status screen shown, next press cycles
+- **Held to 23s:** factory reset triggers automatically, status screen shown
+
+In all cases where the hold is cancelled or completes, the display shows the status screen and the next press cycles profiles (no PING).
 
 ### Wireless Config Mode Active
 
@@ -205,14 +215,14 @@ WiFi: Active
 - PING sent
 - `Daemon: Waiting...` updates to `Connected` or `Not Found`
 
-**Press 2:**
+**Press 2+:**
 - Display shows for 2 seconds:
   ```
   Hold Button to Exit
   Wireless Mode to
   Switch Profiles
   ```
-- Reverts to status screen
+- Reverts to status screen, no PING
 
 **Hold behaviour:**
 - **300ms:** progress bar appears, text:
@@ -220,12 +230,13 @@ WiFi: Active
   Exit Wireless Config Mode?
   [▓▓░░░]  ← 5 blocks, 1 per second
   ```
+- **Released before 5s:** status screen shown, next press cycles
 - **5s:** bar full → text changes to:
   ```
   Release To Exit
   Wireless Config!
   ```
-- **Released at 5s:** exit wireless config mode, return to normal operation
+- **Released at 5s–8s:** exit wireless config mode, return to normal operation
 - **Held past 5s, at 8s:** factory reset screen, same as above
 - **Held to 23s:** factory reset triggers automatically
 
@@ -399,12 +410,13 @@ daemon/
 - Windows daemon support confirmed working ✓
 
 ### Phase 3 — Multi-Profile, Button, WiFi Config (in progress)
-- Physical button (GPIO 5): profile cycling, config mode, factory reset
-- Multi-manufacturer IR profile support stored on LittleFS as JSON
+- Physical button (GPIO 5): profile cycling, config mode, factory reset ✓
+- Multi-manufacturer IR profile support stored on LittleFS as JSON ✓
+- PING/PONG daemon liveness detection (button-triggered, background reader in daemon) ✓
+- Display always-on setting ✓
+- Factory reset via button hold ✓
 - WiFi AP config mode with web UI at `192.168.4.1`
-- PING/PONG daemon liveness detection
-- Display always-on setting
-- Factory reset via button hold or web UI
+- Factory reset via web UI
 
 ---
 

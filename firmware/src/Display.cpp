@@ -151,10 +151,9 @@ void Display::off() {
 
 void Display::setDaemonStatus(DaemonStatus status) {
     daemonStatus_ = status;
-    // Redraw status screen immediately if it is currently showing
-    if (!timerActive_ || timerAction_ == TimerAction::ShowStatus) {
-        drawStatus(lastProfile_, daemonStatus_);
-    }
+    // Always redraw — this is only called when the status screen is showing
+    // and the daemon line needs to update (Waiting → Connected/Not Found).
+    drawStatus(lastProfile_, daemonStatus_);
 }
 
 void Display::setWifiActive(bool active) {

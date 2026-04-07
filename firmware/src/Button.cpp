@@ -38,14 +38,21 @@ void Button::update() {
         if (held < PRESS_MAX_MS) {
             // Released quickly — treat as a press
             if (onPress) onPress();
-        } else if (held >= CONFIG_MS && !configFired_) {
-            // Released at or after the config threshold but before reset countdown
-            // configFired_ guards against firing if it was already handled during hold
-            if (onConfigThreshold) onConfigThreshold();
-            configFired_ = true;
+        } else if (held < CONFIG_MS) {
+            // Released during hold bar phase (300ms–5s) — cancel
+            if (onHoldCancelled) onHoldCancelled();
+        } else if (!resetFired_) {
+            if (held < RESET_START_MS) {
+                // Released in the 5s–8s window ("Release to Enter/Exit" screen) —
+                // trigger config mode toggle
+                if (onConfigThreshold) onConfigThreshold();
+            } else {
+                // Released during factory reset bar (8s–23s) — cancel
+                if (onHoldCancelled) onHoldCancelled();
+            }
         }
-        // If released during hold phase but before config threshold — no action.
-        // The progress bar cancels cleanly by simply not completing.
+        // held >= RESET_TRIGGER_MS and resetFired_: factory reset already
+        // triggered automatically — nothing to do on release
         return;
     }
 
