@@ -97,6 +97,9 @@ void HIDTransport::send(const std::string& cmd) {
     if (rxBuf[0] == 'A' && rxBuf[1] == 'C' && rxBuf[2] == 'K') {
         return;  // success
     }
+    if (rxBuf[0] == 'P' && rxBuf[1] == 'O' && rxBuf[2] == 'N' && rxBuf[3] == 'G') {
+        return;  // PING responded with PONG — daemon liveness confirmed
+    }
     if (rxBuf[0] == 'E' && rxBuf[1] == 'R' && rxBuf[2] == 'R') {
         std::cerr << "[transport] ESP32 returned ERR for command: " << cmd << "\n";
         return;

@@ -1,15 +1,21 @@
-// ESP32 IR Remote — Firmware (Phase 2)
+// ESP32 IR Remote — Firmware (Phase 3)
 //
-// Presents the ESP32-S3 as a USB HID device. Receives ON/OFF commands from
-// the PC daemon as HID output reports, fires the corresponding IR signal,
-// updates the OLED display, and sends an ACK or ERR response as an input report.
+// Presents the ESP32-S3 as a USB HID device. Receives commands from the PC
+// daemon as HID output reports, fires the IR signal for the active manufacturer
+// profile, updates the OLED display, and sends a response as an input report.
 //
-// Communication protocol (Phase 2):
-//   PC → ESP32:  64-byte output report, command string in first bytes ("ON" / "OFF")
-//   ESP32 → PC:  64-byte input report, "ACK" on success or "ERR" on unknown command
+// Communication protocol:
+//   PC → ESP32:  64-byte output report, command string in first bytes
+//   ESP32 → PC:  64-byte input report, response string in first bytes
 //
-// The daemon holds a systemd inhibitor lock and releases it only after receiving ACK,
-// guaranteeing the IR signal has fired before the system sleeps or shuts down.
+//   ON   → fire IR ON  for active profile → ACK
+//   OFF  → fire IR OFF for active profile → ACK
+//   PING → respond PONG (daemon liveness check, triggered by button press)
+//   ???  → ERR (unknown command)
+//
+// The daemon holds a systemd inhibitor lock and releases it only after
+// receiving ACK, guaranteeing the IR signal has fired before the system
+// sleeps or shuts down.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -19,6 +25,7 @@
 #include <IRsend.h>
 #include "USB.h"
 #include "USBHID.h"
+#include "Profiles.h"
 
 // --- Pin config ---
 #define IR_TX_PIN   4   // GPIO connected to the IR LED
@@ -32,17 +39,12 @@
 
 // --- USB HID config ---
 // Development placeholder VID/PID — must match HIDTransport in the daemon.
-// These need to be replaced with a registered VID/PID before commercial release.
+// Replace with a registered VID/PID before commercial release.
 #define DEVICE_VID  0x1234
 #define DEVICE_PID  0x5678
 
 // HID report size — 64 bytes is the maximum for USB full-speed HID
 #define REPORT_SIZE 64
-
-// LG NEC discrete IR codes (confirmed working on LG C2).
-// Discrete codes guarantee the correct TV state regardless of prior state.
-#define LG_IR_ON     0x20DF23DC
-#define LG_IR_OFF    0x20DFA35C
 
 // Vendor-defined HID report descriptor.
 // One 64-byte input report (ESP32 → PC) and one 64-byte output report (PC → ESP32).
@@ -72,8 +74,7 @@ IRsend irSend(IR_TX_PIN);
 USBHID HID;
 
 // Tracks whether the OLED initialised successfully.
-// All display calls check this flag so a failed OLED doesn't halt the program —
-// IR control must still work even if the display is absent or broken.
+// All display calls check this flag so a failed OLED doesn't halt the program.
 bool oledOk = false;
 
 // Clears the display and writes up to two lines of status text.
@@ -86,10 +87,10 @@ void oledShow(const char* line1, const char* line2 = nullptr) {
     display.setCursor(0, 0);
     display.println(line1);
     if (line2) {
-        display.setCursor(0, 16);  // Second line at vertical midpoint of 32px display
+        display.setCursor(0, 16);
         display.println(line2);
     }
-    display.display();  // Push buffer to the physical display
+    display.display();
 }
 
 // Custom HID device class.
@@ -119,22 +120,57 @@ public:
         return HID.SendReport(0, data, REPORT_SIZE);
     }
 
-    bool received_ = false;
+    bool    received_         = false;
     uint8_t rxBuf_[REPORT_SIZE] = {0};
 };
 
 VendorHID device;
 
+// ---------------------------------------------------------------------------
+// IR dispatch
+// Sends the correct IR signal for the given profile using the appropriate
+// protocol. sendNEC/sendSAMSUNG/sendSony are all synchronous — they block
+// until the full signal has been transmitted. ACK is sent only after this
+// returns, guaranteeing the daemon releases its inhibitor lock only after
+// the IR signal has actually fired.
+// ---------------------------------------------------------------------------
+void sendIR(const Profile& profile, bool on) {
+    uint32_t code = on ? profile.onCode : profile.offCode;
+    switch (profile.protocol) {
+        case IrProtocol::SAMSUNG:
+            irSend.sendSAMSUNG(code, kSamsungBits);
+            break;
+        case IrProtocol::SONY:
+            // Sony uses variable bit lengths. 20-bit covers most modern Sony TVs.
+            irSend.sendSony(code, kSony20Bits);
+            break;
+        case IrProtocol::NEC:
+        default:
+            irSend.sendNEC(code, kNECBits);
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
 void setup() {
+    Serial.begin(115200);
+
+    // --- Profiles (LittleFS) ---
+    // Must be initialised before anything that reads the active profile.
+    Profiles::begin();
+
     // --- OLED ---
     Wire.begin(OLED_SDA, OLED_SCL);
     if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
         oledOk = true;
-        oledShow("Waiting...");
+        // Phase 3: display starts off — button wakes it
+        display.clearDisplay();
+        display.display();
     }
 
     // --- IR ---
-    // Configures the RMT peripheral on the TX pin for NEC modulation.
     irSend.begin();
 
     // --- USB HID ---
@@ -147,6 +183,9 @@ void setup() {
     HID.begin();
 }
 
+// ---------------------------------------------------------------------------
+// Loop
+// ---------------------------------------------------------------------------
 void loop() {
     if (!device.received_) return;
     device.received_ = false;
@@ -158,28 +197,32 @@ void loop() {
     uint8_t response[REPORT_SIZE] = {0};
 
     if (cmd == "ON") {
-        // sendNEC() is synchronous — it blocks until the full IR signal has been
-        // transmitted. ACK is sent only after this returns, guaranteeing the daemon
-        // releases its inhibitor lock only after the IR signal has actually fired.
-        irSend.sendNEC(LG_IR_ON, kNECBits);
+        sendIR(Profiles::getActive(), true);
         oledShow("TV On");
         response[0] = 'A'; response[1] = 'C'; response[2] = 'K';
 
     } else if (cmd == "OFF") {
-        irSend.sendNEC(LG_IR_OFF, kNECBits);
+        sendIR(Profiles::getActive(), false);
         oledShow("TV Off");
         response[0] = 'A'; response[1] = 'C'; response[2] = 'K';
 
+    } else if (cmd == "PING") {
+        // Daemon liveness check — respond immediately, no IR action
+        response[0] = 'P'; response[1] = 'O'; response[2] = 'N'; response[3] = 'G';
+
     } else {
-        // Unknown command — send ERR so the daemon knows something went wrong
         oledShow("HID Err", cmd.c_str());
         response[0] = 'E'; response[1] = 'R'; response[2] = 'R';
     }
 
     device.send(response);
 
-    // Brief confirmation display, then return to idle state.
+    // Brief confirmation display for ON/OFF, then turn display off.
+    // PING and ERR do not trigger the delay — only IR commands do.
     // The ACK is already sent above so this delay does not affect the daemon.
-    delay(5000);
-    oledShow("Waiting...");
+    if (cmd == "ON" || cmd == "OFF") {
+        delay(2000);
+        display.clearDisplay();
+        display.display();
+    }
 }
