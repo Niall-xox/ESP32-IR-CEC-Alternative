@@ -15,6 +15,8 @@ void Display::update() {
         switch (timerAction_) {
             case TimerAction::TurnOff:
                 off();
+                // Notify main so pressCount can be reset
+                if (onExpire) onExpire();
                 break;
             case TimerAction::ShowStatus:
                 drawStatus(lastProfile_, daemonStatus_);
@@ -36,13 +38,12 @@ void Display::showStatus(const String& profileName, DaemonStatus status, bool al
     drawStatus(profileName, status);
 
     if (!alwaysOn) {
-        // Start timer — display turns off after STATUS_TIMEOUT_MS
         timerActive_   = true;
         timerStart_    = millis();
         timerDuration_ = STATUS_TIMEOUT_MS;
         timerAction_   = TimerAction::TurnOff;
     } else {
-        timerActive_ = false;  // Always-on: no timer
+        timerActive_ = false;
     }
 }
 
@@ -61,30 +62,26 @@ void Display::showIRConfirm(bool on, bool alwaysOn, const String& profileName) {
     timerActive_   = true;
     timerStart_    = millis();
     timerDuration_ = IR_CONFIRM_TIMEOUT_MS;
-    // After confirmation: turn off (button-press will update status if needed)
     timerAction_   = alwaysOn ? TimerAction::ShowStatus : TimerAction::TurnOff;
 }
 
 void Display::showHoldBar(uint32_t heldMs, bool enteringWifi,
                           bool alwaysOn, const String& profileName) {
     if (!ok_) return;
-    timerActive_  = false;  // Cancel any pending timer while bar is active
-    lastProfile_  = profileName;
+    timerActive_ = false;
+    lastProfile_ = profileName;
     lastAlwaysOn_ = alwaysOn;
 
     oled_.clearDisplay();
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);
 
-    // Top line — instruction text
     oled_.setCursor(0, 0);
     oled_.print(enteringWifi ? "Enter Wireless Config?" : "Exit Wireless Config?");
 
-    // Progress bar — 5 blocks over 5 seconds (300ms–5000ms hold range)
-    // Map held time from [PRESS_MAX_MS, CONFIG_MS] → [0, 5] filled blocks
-    uint32_t holdRange = CONFIG_MS - 300;  // 4700ms range
-    uint32_t elapsed   = heldMs > 300 ? heldMs - 300 : 0;
-    uint8_t  filled    = (uint8_t)((elapsed * 5) / holdRange);
+    // 5-block bar filling from 300ms to 5000ms
+    uint32_t elapsed = heldMs > 300 ? heldMs - 300 : 0;
+    uint8_t  filled  = (uint8_t)((elapsed * 5) / (CONFIG_MS - 300));
     if (filled > 5) filled = 5;
     drawProgressBar(filled, 5, 20);
 
@@ -102,10 +99,9 @@ void Display::showResetBar(uint32_t heldMs) {
     oled_.setCursor(0, 0);
     oled_.print("Hold To Factory Reset");
 
-    // 15-segment bar over the 8000ms–23000ms hold range
+    // 15-segment bar filling from 8s to 23s
     uint32_t elapsed = heldMs > RESET_START_MS ? heldMs - RESET_START_MS : 0;
-    uint32_t range   = RESET_END_MS - RESET_START_MS;  // 15000ms
-    uint8_t  filled  = (uint8_t)((elapsed * 15) / range);
+    uint8_t  filled  = (uint8_t)((elapsed * 15) / (RESET_END_MS - RESET_START_MS));
     if (filled > 15) filled = 15;
     drawProgressBar(filled, 15, 20);
 
@@ -155,11 +151,14 @@ void Display::off() {
 
 void Display::setDaemonStatus(DaemonStatus status) {
     daemonStatus_ = status;
-    // If the display is currently showing the status screen, redraw it
-    // so the daemon line updates immediately without waiting for a button press.
+    // Redraw status screen immediately if it is currently showing
     if (!timerActive_ || timerAction_ == TimerAction::ShowStatus) {
         drawStatus(lastProfile_, daemonStatus_);
     }
+}
+
+void Display::setWifiActive(bool active) {
+    wifiActive_ = active;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,34 +171,42 @@ void Display::drawStatus(const String& profileName, DaemonStatus status) {
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);
 
-    // Line 1 — active profile name
-    oled_.setCursor(0, 0);
-    oled_.print("Profile: ");
-    oled_.print(profileName);
+    if (wifiActive_) {
+        // Three-line layout: profile / daemon / wifi status
+        // Each line is 8px tall. Spaced at 0, 11, 22 to fit within 32px.
+        oled_.setCursor(0, 0);
+        oled_.print("Profile: ");
+        oled_.print(profileName);
 
-    // Line 2 — daemon connection status
-    oled_.setCursor(0, 12);
-    oled_.print("Daemon: ");
-    oled_.print(daemonStatusStr(status));
+        oled_.setCursor(0, 11);
+        oled_.print("Daemon: ");
+        oled_.print(daemonStatusStr(status));
+
+        oled_.setCursor(0, 22);
+        oled_.print("WiFi: Active");
+    } else {
+        // Two-line layout: profile / daemon
+        oled_.setCursor(0, 0);
+        oled_.print("Profile: ");
+        oled_.print(profileName);
+
+        oled_.setCursor(0, 12);
+        oled_.print("Daemon: ");
+        oled_.print(daemonStatusStr(status));
+    }
 
     oled_.display();
 }
 
-// Draw a block-style progress bar.
-// filled — number of filled blocks, total — total number of blocks, y — top pixel row.
 void Display::drawProgressBar(uint8_t filled, uint8_t total, uint8_t y) {
-    // Each block is sized to fit the 128px width with 1px gaps between blocks
-    // Block width = (128 - (total - 1)) / total, rounded down
     uint8_t blockW = (128 - (total - 1)) / total;
     uint8_t barH   = 10;
 
     for (uint8_t i = 0; i < total; i++) {
         uint8_t x = i * (blockW + 1);
         if (i < filled) {
-            // Filled block — solid rectangle
             oled_.fillRect(x, y, blockW, barH, SSD1306_WHITE);
         } else {
-            // Empty block — outline only
             oled_.drawRect(x, y, blockW, barH, SSD1306_WHITE);
         }
     }

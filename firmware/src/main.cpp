@@ -10,12 +10,8 @@
 //
 //   ON   → fire IR ON  for active profile → ACK
 //   OFF  → fire IR OFF for active profile → ACK
-//   PING → respond PONG (daemon liveness check, triggered by button press)
+//   PING → respond PONG (daemon liveness check — sent by button press or daemon)
 //   ???  → ERR
-//
-// The daemon holds a systemd inhibitor lock and releases it only after
-// receiving ACK, guaranteeing the IR signal has fired before the system
-// sleeps or shuts down.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -30,10 +26,10 @@
 #include "Display.h"
 
 // --- Pin config ---
-#define IR_TX_PIN    4   // GPIO connected to the IR LED
-#define OLED_SDA     2   // I2C data line
-#define OLED_SCL     3   // I2C clock line
-#define BUTTON_PIN   5   // Tactile button (other leg to GND)
+#define IR_TX_PIN    4
+#define OLED_SDA     2
+#define OLED_SCL     3
+#define BUTTON_PIN   5
 
 // --- OLED config ---
 #define OLED_WIDTH  128
@@ -45,9 +41,6 @@
 #define DEVICE_PID  0x5678
 #define REPORT_SIZE    64
 
-// Vendor-defined HID report descriptor.
-// One 64-byte input report (ESP32 → PC) and one 64-byte output report (PC → ESP32).
-// Usage page 0xFF00 — the OS will not treat this as a keyboard or mouse.
 static const uint8_t REPORT_DESCRIPTOR[] = {
     0x06, 0x00, 0xFF,
     0x09, 0x01,
@@ -79,15 +72,10 @@ Display          display(oled);
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
+bool    wifiActive = false;
 
-// True when WiFi config mode is active (AP running, web server serving).
-// Phase 3 step 6 will set this — for now the button thresholds are wired
-// but WiFi itself is not started yet.
-bool wifiActive = false;
-
-// Press counter — tracks whether this is the first or second press in a
-// display-on window, used to distinguish PING press from cycle press.
-// Resets when the display turns off or a hold begins.
+// Tracks whether this is the first or second press in a display-on window.
+// Reset to 0 when display turns off (via display.onExpire) or a hold begins.
 uint8_t pressCount = 0;
 
 // ---------------------------------------------------------------------------
@@ -120,9 +108,7 @@ public:
 VendorHID hidDevice;
 
 // ---------------------------------------------------------------------------
-// IR dispatch
-// Sends the correct IR signal for the given profile and direction.
-// All send functions are synchronous — ACK is only sent after this returns.
+// IR dispatch — synchronous, blocks until the full signal is transmitted
 // ---------------------------------------------------------------------------
 void sendIR(const Profile& profile, bool on) {
     uint32_t code = on ? profile.onCode : profile.offCode;
@@ -131,7 +117,6 @@ void sendIR(const Profile& profile, bool on) {
             irSend.sendSAMSUNG(code, kSamsungBits);
             break;
         case IrProtocol::SONY:
-            // 20-bit covers most modern Sony TVs
             irSend.sendSony(code, kSony20Bits);
             break;
         case IrProtocol::NEC:
@@ -143,18 +128,21 @@ void sendIR(const Profile& profile, bool on) {
 
 // ---------------------------------------------------------------------------
 // PING helper
-// Sends a PING to the daemon and waits briefly for PONG.
-// Updates the display daemon status line with the result.
-// Called on every first button press.
+// Shows "Daemon: Waiting..." immediately, sends PING as an input report,
+// waits up to 300ms for a PONG output report from the daemon background reader,
+// then updates the display with Connected or Not Found.
 // ---------------------------------------------------------------------------
-void pingDaemon() {
-    display.setDaemonStatus(DaemonStatus::Waiting);
+void pingDaemon(bool alwaysOn) {
+    // Show status with Waiting first so the display updates before the PING
+    display.showStatus(Profiles::getActive().name, DaemonStatus::Waiting, alwaysOn);
 
-    uint8_t txBuf[REPORT_SIZE + 1] = {0};
-    txBuf[1] = 'P'; txBuf[2] = 'I'; txBuf[3] = 'N'; txBuf[4] = 'G';
-    hidDevice.send(txBuf + 1);  // send() takes the payload without the report ID byte
+    // Send PING as an HID input report (ESP32 → PC).
+    // The daemon background reader thread will see this and send PONG back.
+    uint8_t txBuf[REPORT_SIZE] = {0};
+    txBuf[0] = 'P'; txBuf[1] = 'I'; txBuf[2] = 'N'; txBuf[3] = 'G';
+    hidDevice.send(txBuf);
 
-    // Wait up to 300ms for a PONG — short enough that the display feels instant
+    // Wait up to 300ms for PONG to arrive as an output report via _onOutput
     uint32_t start = millis();
     while ((millis() - start) < 300) {
         if (hidDevice.received_) {
@@ -175,11 +163,12 @@ void pingDaemon() {
 // ---------------------------------------------------------------------------
 void onButtonPress() {
     pressCount++;
+    bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
 
     if (wifiActive) {
         if (pressCount == 1) {
-            // First press in WiFi mode: PING and update status
-            pingDaemon();
+            // First press in WiFi mode: PING and refresh status screen
+            pingDaemon(true);  // alwaysOn=true in WiFi mode
         } else {
             // Second press in WiFi mode: show lock message, reset counter
             display.showWifiLockMessage();
@@ -189,57 +178,46 @@ void onButtonPress() {
     }
 
     // Normal operation
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
-
     if (pressCount == 1) {
-        // First press: PING daemon and show status screen
-        pingDaemon();
-        display.showStatus(
-            Profiles::getActive().name,
-            display.getDaemonStatus(),
-            alwaysOn
-        );
-        if (!alwaysOn) pressCount = 1;  // Will be reset when display turns off
+        // First press: PING and show status screen
+        pingDaemon(alwaysOn);
+        // In non-always-on mode the display is now on with a 2s timer.
+        // pressCount stays at 1 until the timer fires onExpire (which resets to 0)
+        // or the user presses again (which increments to 2).
     } else {
-        // Second press: cycle to next visible profile
+        // Second press: cycle to next visible profile and refresh display
         int next = Profiles::nextVisibleIndex();
         Profiles::getMutableSettings().activeProfile = next;
         Profiles::saveSettings();
 
-        display.showStatus(
-            Profiles::getActive().name,
-            display.getDaemonStatus(),
-            alwaysOn
-        );
+        display.showStatus(Profiles::getActive().name, display.getDaemonStatus(), alwaysOn);
         pressCount = 0;
     }
 }
 
 void onButtonHold(uint32_t heldMs) {
-    pressCount = 0;  // Cancel any pending press sequence when hold begins
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
+    // A hold cancels any in-progress press sequence
+    pressCount = 0;
+    bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
 
     if (heldMs >= 8000) {
-        // Factory reset countdown bar (8s–23s)
         display.showResetBar(heldMs);
     } else if (heldMs >= 5000) {
-        // Config threshold reached — show release prompt
         display.showConfigRelease(!wifiActive);
     } else {
-        // Normal hold bar (300ms–5s)
         display.showHoldBar(heldMs, !wifiActive, alwaysOn, Profiles::getActive().name);
     }
 }
 
 void onConfigThreshold() {
-    // Button released at the 5s config threshold — toggle WiFi mode
-    // WiFi start/stop will be implemented in step 6.
+    // Button released at 5s — toggle WiFi config mode
     wifiActive = !wifiActive;
+    display.setWifiActive(wifiActive);  // Tell Display so it shows/hides WiFi line
     Serial.printf("[app] Wireless config mode: %s\n", wifiActive ? "ON" : "OFF");
 
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
-    display.showStatus(Profiles::getActive().name, display.getDaemonStatus(),
-                       wifiActive ? true : alwaysOn);
+    // WiFi start/stop implemented in step 6 — toggle is wired, AP not started yet
+    bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
+    display.showStatus(Profiles::getActive().name, display.getDaemonStatus(), alwaysOn);
     pressCount = 0;
 }
 
@@ -247,8 +225,10 @@ void onFactoryReset() {
     Serial.println("[app] Factory reset triggered");
     Profiles::factoryReset();
     wifiActive = false;
+    display.setWifiActive(false);
     pressCount = 0;
-    display.showStatus(Profiles::getActive().name, DaemonStatus::Unknown, false);
+    bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
+    display.showStatus(Profiles::getActive().name, DaemonStatus::Unknown, alwaysOn);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,26 +237,25 @@ void onFactoryReset() {
 void setup() {
     Serial.begin(115200);
 
-    // --- Profiles (LittleFS) ---
     Profiles::begin();
 
-    // --- OLED ---
     Wire.begin(OLED_SDA, OLED_SCL);
     if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-        display.begin();  // Clears display, starts off
+        display.begin();
     }
 
-    // --- Button ---
     button.begin();
-    button.onPress         = onButtonPress;
-    button.onHold          = onButtonHold;
+    button.onPress           = onButtonPress;
+    button.onHold            = onButtonHold;
     button.onConfigThreshold = onConfigThreshold;
-    button.onFactoryReset  = onFactoryReset;
+    button.onFactoryReset    = onFactoryReset;
 
-    // --- IR ---
+    // When the STATUS screen timer expires and the display turns off,
+    // reset pressCount so the next press is treated as a first press again.
+    display.onExpire = []() { pressCount = 0; };
+
     irSend.begin();
 
-    // --- USB HID ---
     hidDevice.begin();
     USB.VID(DEVICE_VID);
     USB.PID(DEVICE_PID);
@@ -290,11 +269,9 @@ void setup() {
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
-    // Drive button timing and display timer expiry
     button.update();
     display.update();
 
-    // --- HID command handling ---
     if (!hidDevice.received_) return;
     hidDevice.received_ = false;
 
@@ -318,12 +295,10 @@ void loop() {
         response[0] = 'A'; response[1] = 'C'; response[2] = 'K';
 
     } else if (cmd == "PING") {
-        // Daemon liveness check from the PC side (distinct from button-triggered PING)
+        // Daemon-initiated PING (distinct from button-triggered PING)
         response[0] = 'P'; response[1] = 'O'; response[2] = 'N'; response[3] = 'G';
 
     } else {
-        display.showStatus(Profiles::getActive().name, display.getDaemonStatus(),
-                           Profiles::getSettings().displayAlwaysOn || wifiActive);
         response[0] = 'E'; response[1] = 'R'; response[2] = 'R';
     }
 
