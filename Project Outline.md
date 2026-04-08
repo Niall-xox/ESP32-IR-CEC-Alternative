@@ -401,8 +401,10 @@ daemon/
 - Multi-manufacturer IR profile support stored on LittleFS as JSON ✓
 - Display always-on setting ✓
 - Factory reset via button hold ✓
-- WiFi AP config mode with web UI at `192.168.4.1`
-- Factory reset via web UI
+- WiFi AP config mode (`ESP32-IR-Remote` / `irremote123`) at `192.168.4.1` ✓
+- Web UI for profile management and settings ✓
+- Factory reset via web UI ✓
+- Minor adjustments pending
 
 ---
 

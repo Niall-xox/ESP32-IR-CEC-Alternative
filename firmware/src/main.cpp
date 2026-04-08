@@ -18,6 +18,10 @@
 #include <Adafruit_SSD1306.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 #include "USB.h"
 #include "USBHID.h"
 #include "Profiles.h"
@@ -39,6 +43,10 @@
 #define DEVICE_VID  0x1234
 #define DEVICE_PID  0x5678
 #define REPORT_SIZE    64
+
+// --- WiFi AP config ---
+#define WIFI_SSID  "ESP32-IR-Remote"
+#define WIFI_PASS  "irremote123"
 
 static const uint8_t REPORT_DESCRIPTOR[] = {
     0x06, 0x00, 0xFF,
@@ -67,6 +75,7 @@ IRsend           irSend(IR_TX_PIN);
 USBHID           HID;
 Button           button(BUTTON_PIN);
 Display          display(oled);
+WebServer        server(80);
 
 // ---------------------------------------------------------------------------
 // Application state
@@ -128,6 +137,151 @@ void sendIR(const Profile& profile, bool on) {
 }
 
 // ---------------------------------------------------------------------------
+// WiFi AP + Web Server
+// ---------------------------------------------------------------------------
+void stopWifi();
+
+void startWifi() {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(WIFI_SSID, WIFI_PASS);
+    Serial.printf("[wifi] AP started — SSID: %s  IP: %s\n",
+                  WIFI_SSID, WiFi.softAPIP().toString().c_str());
+
+    // --- API endpoints ---
+
+    // GET /api/profiles — return all profiles as JSON array
+    server.on("/api/profiles", HTTP_GET, []() {
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (const auto& p : Profiles::getAll()) {
+            JsonObject obj = arr.add<JsonObject>();
+            char onBuf[11], offBuf[11];
+            snprintf(onBuf,  sizeof(onBuf),  "0x%08X", p.onCode);
+            snprintf(offBuf, sizeof(offBuf), "0x%08X", p.offCode);
+            obj["name"]     = p.name;
+            obj["protocol"] = Profiles::protocolToString(p.protocol);
+            obj["on"]       = onBuf;
+            obj["off"]      = offBuf;
+            obj["visible"]  = p.visible;
+        }
+        String json;
+        serializeJson(doc, json);
+        server.send(200, "application/json", json);
+    });
+
+    // POST /api/profiles — replace all profiles from JSON body
+    server.on("/api/profiles", HTTP_POST, []() {
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, server.arg("plain"));
+        if (err) {
+            server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+            return;
+        }
+        // Replace in-memory profiles and save
+        std::vector<Profile> newProfiles;
+        for (JsonObject obj : doc.as<JsonArray>()) {
+            Profile p;
+            p.name     = obj["name"].as<String>();
+            p.protocol = Profiles::protocolFromString(obj["protocol"].as<String>());
+            p.onCode   = strtoul(obj["on"].as<const char*>(), nullptr, 16);
+            p.offCode  = strtoul(obj["off"].as<const char*>(), nullptr, 16);
+            p.visible  = obj["visible"] | true;
+            newProfiles.push_back(p);
+        }
+        if (newProfiles.empty()) {
+            server.send(400, "application/json", "{\"error\":\"At least one profile required\"}");
+            return;
+        }
+        // Overwrite in-memory state via Profiles API
+        auto& all = const_cast<std::vector<Profile>&>(Profiles::getAll());
+        all = std::move(newProfiles);
+        // Clamp active profile
+        if (Profiles::getSettings().activeProfile >= (int)Profiles::getAll().size()) {
+            Profiles::getMutableSettings().activeProfile = 0;
+        }
+        Profiles::saveProfiles();
+        Profiles::saveSettings();
+        server.send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // GET /api/settings — return settings as JSON
+    server.on("/api/settings", HTTP_GET, []() {
+        const Settings& s = Profiles::getSettings();
+        JsonDocument doc;
+        doc["active_profile"]    = s.activeProfile;
+        doc["display_always_on"] = s.displayAlwaysOn;
+        String json;
+        serializeJson(doc, json);
+        server.send(200, "application/json", json);
+    });
+
+    // POST /api/settings — update settings from JSON body
+    server.on("/api/settings", HTTP_POST, []() {
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, server.arg("plain"));
+        if (err) {
+            server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+            return;
+        }
+        Settings& s = Profiles::getMutableSettings();
+        if (doc.containsKey("active_profile")) {
+            int idx = doc["active_profile"].as<int>();
+            if (idx >= 0 && idx < (int)Profiles::getAll().size()) {
+                s.activeProfile = idx;
+            }
+        }
+        if (doc.containsKey("display_always_on")) {
+            s.displayAlwaysOn = doc["display_always_on"].as<bool>();
+        }
+        Profiles::saveSettings();
+        server.send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/factory-reset — restore defaults
+    server.on("/api/factory-reset", HTTP_POST, []() {
+        Profiles::factoryReset();
+        server.send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/exit — save and exit wireless config mode
+    server.on("/api/exit", HTTP_POST, []() {
+        server.send(200, "application/json", "{\"ok\":true}");
+        // Defer stop to next loop() so the response is sent first
+        wifiActive = false;
+    });
+
+    // Serve static files from LittleFS (web UI)
+    server.onNotFound([]() {
+        String path = server.uri();
+        if (path == "/") path = "/index.html";
+
+        if (LittleFS.exists(path)) {
+            String contentType = "text/plain";
+            if      (path.endsWith(".html")) contentType = "text/html";
+            else if (path.endsWith(".css"))  contentType = "text/css";
+            else if (path.endsWith(".js"))   contentType = "application/javascript";
+            else if (path.endsWith(".json")) contentType = "application/json";
+
+            File f = LittleFS.open(path, "r");
+            server.streamFile(f, contentType);
+            f.close();
+        } else {
+            server.send(404, "text/plain", "Not Found");
+        }
+    });
+
+    server.begin();
+    Serial.println("[wifi] Web server started on port 80");
+}
+
+void stopWifi() {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    Serial.println("[wifi] AP stopped");
+}
+
+// ---------------------------------------------------------------------------
 // Button callbacks
 // ---------------------------------------------------------------------------
 void onButtonPress() {
@@ -182,24 +336,27 @@ void onButtonHold(uint32_t heldMs) {
 void onConfigThreshold() {
     // Button released at 5s — toggle WiFi config mode
     wifiActive = !wifiActive;
-    display.setWifiActive(wifiActive);  // Tell Display so it shows/hides WiFi line
-    Serial.printf("[app] Wireless config mode: %s\n", wifiActive ? "ON" : "OFF");
+    display.setWifiActive(wifiActive);
 
-    // WiFi start/stop implemented in step 6 — toggle is wired, AP not started yet
+    if (wifiActive) {
+        startWifi();
+    } else {
+        stopWifi();
+    }
+
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
     display.showStatus(Profiles::getActive().name, alwaysOn);
-    // Display is now on — next press should cycle profiles, not ping
     pressCount = 1;
 }
 
 void onFactoryReset() {
     Serial.println("[app] Factory reset triggered");
     Profiles::factoryReset();
+    if (wifiActive) stopWifi();
     wifiActive = false;
     display.setWifiActive(false);
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
     display.showStatus(Profiles::getActive().name, alwaysOn);
-    // Display is now on — next press should cycle profiles, not ping
     pressCount = 1;
 }
 
@@ -249,6 +406,17 @@ void setup() {
 void loop() {
     button.update();
     display.update();
+
+    if (wifiActive) {
+        server.handleClient();
+    } else if (WiFi.getMode() != WIFI_OFF) {
+        // Deferred stop from /api/exit — response has been sent, now shut down
+        stopWifi();
+        display.setWifiActive(false);
+        bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
+        display.showStatus(Profiles::getActive().name, alwaysOn);
+        pressCount = 1;
+    }
 
     if (!hidDevice.received_) return;
     hidDevice.received_ = false;

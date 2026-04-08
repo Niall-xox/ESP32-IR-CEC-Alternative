@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 IR Remote</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 16px; max-width: 600px; margin: 0 auto; }
+h1 { font-size: 1.3em; margin-bottom: 16px; color: #fff; }
+h2 { font-size: 1.1em; margin: 20px 0 10px; color: #ccc; }
+
+.card { background: #16213e; border-radius: 8px; padding: 14px; margin-bottom: 12px; border: 1px solid #0f3460; }
+.card.active { border-color: #4ecca3; }
+
+.profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.profile-name { font-weight: 600; font-size: 1.05em; }
+.profile-active-badge { background: #4ecca3; color: #1a1a2e; font-size: 0.75em; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+
+.field { margin-bottom: 8px; }
+.field label { display: block; font-size: 0.8em; color: #999; margin-bottom: 3px; }
+.field input, .field select { width: 100%; padding: 8px; background: #0f3460; border: 1px solid #1a1a5e; border-radius: 4px; color: #e0e0e0; font-size: 0.95em; }
+.field input:focus, .field select:focus { outline: none; border-color: #4ecca3; }
+
+.row { display: flex; gap: 8px; }
+.row .field { flex: 1; }
+
+.profile-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.profile-actions button { flex: 1; }
+
+.toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; }
+.toggle-row label { font-size: 0.95em; }
+.switch { position: relative; width: 44px; height: 24px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; background: #0f3460; border-radius: 24px; cursor: pointer; transition: 0.2s; }
+.slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: #e0e0e0; border-radius: 50%; transition: 0.2s; }
+.switch input:checked + .slider { background: #4ecca3; }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+
+button { padding: 10px 16px; border: none; border-radius: 6px; font-size: 0.9em; cursor: pointer; font-weight: 500; transition: opacity 0.15s; }
+button:active { opacity: 0.7; }
+
+.btn-primary { background: #4ecca3; color: #1a1a2e; }
+.btn-secondary { background: #0f3460; color: #e0e0e0; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-small { padding: 6px 12px; font-size: 0.8em; }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+.actions button { flex: 1; min-width: 120px; }
+
+.status { text-align: center; padding: 8px; font-size: 0.85em; color: #4ecca3; min-height: 30px; }
+.status.error { color: #e74c3c; }
+</style>
+</head>
+<body>
+
+<h1>ESP32 IR Remote</h1>
+<div id="status" class="status"></div>
+
+<h2>Profiles</h2>
+<div id="profiles"></div>
+<button class="btn-primary" onclick="addProfile()" style="width:100%;margin-bottom:8px;">+ Add Profile</button>
+
+<h2>Settings</h2>
+<div class="card">
+  <div class="toggle-row">
+    <label>Display Always On</label>
+    <label class="switch">
+      <input type="checkbox" id="alwaysOn" onchange="settingsChanged=true">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="btn-secondary" onclick="restore()">Restore</button>
+  <button class="btn-primary" onclick="save()">Save</button>
+  <button class="btn-danger" onclick="factoryReset()">Factory Reset</button>
+  <button class="btn-primary" onclick="saveAndExit()">Save & Exit</button>
+</div>
+
+<script>
+let profiles = [];
+let settings = {};
+let settingsChanged = false;
+
+async function load() {
+  try {
+    const [pRes, sRes] = await Promise.all([
+      fetch('/api/profiles'),
+      fetch('/api/settings')
+    ]);
+    profiles = await pRes.json();
+    settings = await sRes.json();
+    render();
+  } catch (e) {
+    showStatus('Failed to load data', true);
+  }
+}
+
+function render() {
+  const container = document.getElementById('profiles');
+  container.innerHTML = '';
+
+  profiles.forEach((p, i) => {
+    const isActive = i === settings.active_profile;
+    const div = document.createElement('div');
+    div.className = 'card' + (isActive ? ' active' : '');
+    div.innerHTML = `
+      <div class="profile-header">
+        <span class="profile-name">${esc(p.name)}</span>
+        ${isActive ? '<span class="profile-active-badge">Active</span>' : ''}
+      </div>
+      <div class="field">
+        <label>Name</label>
+        <input value="${esc(p.name)}" onchange="profiles[${i}].name=this.value">
+      </div>
+      <div class="field">
+        <label>Protocol</label>
+        <select onchange="profiles[${i}].protocol=this.value">
+          <option value="NEC"${p.protocol==='NEC'?' selected':''}>NEC</option>
+          <option value="SAMSUNG"${p.protocol==='SAMSUNG'?' selected':''}>SAMSUNG</option>
+          <option value="SONY"${p.protocol==='SONY'?' selected':''}>SONY</option>
+        </select>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>ON Code</label>
+          <input value="${esc(p.on)}" onchange="profiles[${i}].on=this.value" placeholder="0x00000000">
+        </div>
+        <div class="field">
+          <label>OFF Code</label>
+          <input value="${esc(p.off)}" onchange="profiles[${i}].off=this.value" placeholder="0x00000000">
+        </div>
+      </div>
+      <div class="profile-actions">
+        <div class="toggle-row" style="flex:1;padding:0">
+          <label style="font-size:0.85em">Visible</label>
+          <label class="switch">
+            <input type="checkbox" ${p.visible?'checked':''} onchange="profiles[${i}].visible=this.checked">
+            <span class="slider"></span>
+          </label>
+        </div>
+        ${!isActive ? `<button class="btn-secondary btn-small" onclick="setActive(${i})">Set Active</button>` : ''}
+        ${profiles.length > 1 ? `<button class="btn-danger btn-small" onclick="removeProfile(${i})">Delete</button>` : ''}
+      </div>
+    `;
+    container.appendChild(div);
+  });
+
+  document.getElementById('alwaysOn').checked = settings.display_always_on;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function setActive(i) {
+  settings.active_profile = i;
+  render();
+}
+
+function addProfile() {
+  profiles.push({ name: 'New', protocol: 'NEC', on: '0x00000000', off: '0x00000000', visible: true });
+  render();
+  // Scroll to bottom
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function removeProfile(i) {
+  if (profiles.length <= 1) return;
+  profiles.splice(i, 1);
+  if (settings.active_profile >= profiles.length) {
+    settings.active_profile = profiles.length - 1;
+  } else if (settings.active_profile > i) {
+    settings.active_profile--;
+  }
+  render();
+}
+
+async function save() {
+  try {
+    showStatus('Saving...');
+    settings.display_always_on = document.getElementById('alwaysOn').checked;
+
+    const [pRes, sRes] = await Promise.all([
+      fetch('/api/profiles', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(profiles) }),
+      fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(settings) })
+    ]);
+
+    if (!pRes.ok || !sRes.ok) throw new Error('Save failed');
+    showStatus('Saved');
+    settingsChanged = false;
+  } catch (e) {
+    showStatus('Save failed', true);
+  }
+}
+
+async function restore() {
+  showStatus('Restoring...');
+  await load();
+  showStatus('Restored to last saved state');
+}
+
+async function factoryReset() {
+  if (!confirm('Reset all profiles and settings to factory defaults?')) return;
+  try {
+    showStatus('Resetting...');
+    const res = await fetch('/api/factory-reset', { method: 'POST' });
+    if (!res.ok) throw new Error();
+    await load();
+    showStatus('Factory reset complete');
+  } catch (e) {
+    showStatus('Factory reset failed', true);
+  }
+}
+
+async function saveAndExit() {
+  try {
+    await save();
+    showStatus('Exiting wireless mode...');
+    await fetch('/api/exit', { method: 'POST' });
+    showStatus('WiFi shutting down. You can close this page.');
+  } catch (e) {
+    showStatus('Failed', true);
+  }
+}
+
+function showStatus(msg, isError) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status' + (isError ? ' error' : '');
+  if (!isError && msg !== 'Saving...' && msg !== 'Restoring...' && msg !== 'Resetting...') {
+    setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
+  }
+}
+
+load();
+</script>
+</body>
+</html>
