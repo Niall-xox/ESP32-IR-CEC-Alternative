@@ -4,7 +4,7 @@
 //
 // States:
 //   OFF        — blank
-//   STATUS     — profile name + daemon status (+ WiFi: Active when in WiFi mode)
+//   STATUS     — profile name (+ WiFi: Active when in WiFi mode)
 //   IR_CONFIRM — "TV On" or "TV Off" for 2 seconds after an IR command
 //   HOLD_BAR   — 5-block progress bar while button held (config mode countdown)
 //   RESET_BAR  — 15-segment bar when held past config threshold
@@ -15,13 +15,6 @@
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <functional>
-
-enum class DaemonStatus {
-    Unknown,    // No PING sent yet
-    Waiting,    // PING sent, awaiting PONG
-    Connected,  // PONG received
-    NotFound    // PING timed out
-};
 
 class Display {
 public:
@@ -37,7 +30,7 @@ public:
     // --- State setters ---
 
     // Show status screen. In non-always-on mode starts a 2s timer then turns off.
-    void showStatus(const String& profileName, DaemonStatus status, bool alwaysOn);
+    void showStatus(const String& profileName, bool alwaysOn);
 
     // Show "TV On" or "TV Off" for 2s then turn off (or return to status if always-on).
     void showIRConfirm(bool on, bool alwaysOn, const String& profileName);
@@ -57,19 +50,14 @@ public:
     // Turn display off.
     void off();
 
-    // Update daemon status and redraw if status screen is currently showing.
-    void setDaemonStatus(DaemonStatus status);
-    DaemonStatus getDaemonStatus() const { return daemonStatus_; }
-
     // Notify the display module when WiFi mode changes so the status screen
     // shows or hides the "WiFi: Active" line correctly.
     void setWifiActive(bool active);
 
 private:
     Adafruit_SSD1306& oled_;
-    bool              ok_           = false;
-    DaemonStatus      daemonStatus_ = DaemonStatus::Unknown;
-    bool              wifiActive_   = false;
+    bool              ok_         = false;
+    bool              wifiActive_ = false;
 
     bool     timerActive_   = false;
     uint32_t timerStart_    = 0;
@@ -81,9 +69,8 @@ private:
     String lastProfile_;
     bool   lastAlwaysOn_ = false;
 
-    void        drawStatus(const String& profileName, DaemonStatus status);
-    void        drawProgressBar(uint8_t filled, uint8_t total, uint8_t y);
-    const char* daemonStatusStr(DaemonStatus s);
+    void drawStatus(const String& profileName);
+    void drawProgressBar(uint8_t filled, uint8_t total, uint8_t y);
 
     static constexpr uint32_t STATUS_TIMEOUT_MS     = 2000;
     static constexpr uint32_t IR_CONFIRM_TIMEOUT_MS = 2000;

@@ -19,7 +19,7 @@ void Display::update() {
                 if (onExpire) onExpire();
                 break;
             case TimerAction::ShowStatus:
-                drawStatus(lastProfile_, daemonStatus_);
+                drawStatus(lastProfile_);
                 break;
         }
     }
@@ -29,13 +29,12 @@ void Display::update() {
 // State setters
 // ---------------------------------------------------------------------------
 
-void Display::showStatus(const String& profileName, DaemonStatus status, bool alwaysOn) {
+void Display::showStatus(const String& profileName, bool alwaysOn) {
     if (!ok_) return;
-    daemonStatus_ = status;
     lastProfile_  = profileName;
     lastAlwaysOn_ = alwaysOn;
 
-    drawStatus(profileName, status);
+    drawStatus(profileName);
 
     if (!alwaysOn) {
         timerActive_   = true;
@@ -149,13 +148,6 @@ void Display::off() {
     oled_.display();
 }
 
-void Display::setDaemonStatus(DaemonStatus status) {
-    daemonStatus_ = status;
-    // Always redraw — this is only called when the status screen is showing
-    // and the daemon line needs to update (Waiting → Connected/Not Found).
-    drawStatus(lastProfile_, daemonStatus_);
-}
-
 void Display::setWifiActive(bool active) {
     wifiActive_ = active;
 }
@@ -164,34 +156,25 @@ void Display::setWifiActive(bool active) {
 // Internal draw helpers
 // ---------------------------------------------------------------------------
 
-void Display::drawStatus(const String& profileName, DaemonStatus status) {
+void Display::drawStatus(const String& profileName) {
     if (!ok_) return;
     oled_.clearDisplay();
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);
 
     if (wifiActive_) {
-        // Three-line layout: profile / daemon / wifi status
-        // Each line is 8px tall. Spaced at 0, 11, 22 to fit within 32px.
-        oled_.setCursor(0, 0);
-        oled_.print("Profile: ");
-        oled_.print(profileName);
-
-        oled_.setCursor(0, 11);
-        oled_.print("Daemon: ");
-        oled_.print(daemonStatusStr(status));
-
-        oled_.setCursor(0, 22);
-        oled_.print("WiFi: Active");
-    } else {
-        // Two-line layout: profile / daemon
+        // Two-line layout: profile / wifi status
         oled_.setCursor(0, 0);
         oled_.print("Profile: ");
         oled_.print(profileName);
 
         oled_.setCursor(0, 12);
-        oled_.print("Daemon: ");
-        oled_.print(daemonStatusStr(status));
+        oled_.print("WiFi: Active");
+    } else {
+        // Single line: profile name, vertically centered
+        oled_.setCursor(0, 12);
+        oled_.print("Profile: ");
+        oled_.print(profileName);
     }
 
     oled_.display();
@@ -208,14 +191,5 @@ void Display::drawProgressBar(uint8_t filled, uint8_t total, uint8_t y) {
         } else {
             oled_.drawRect(x, y, blockW, barH, SSD1306_WHITE);
         }
-    }
-}
-
-const char* Display::daemonStatusStr(DaemonStatus s) {
-    switch (s) {
-        case DaemonStatus::Waiting:   return "Waiting...";
-        case DaemonStatus::Connected: return "Connected";
-        case DaemonStatus::NotFound:  return "Not Found";
-        default:                      return "Unknown";
     }
 }
