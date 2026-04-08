@@ -64,6 +64,8 @@ void HIDTransport::send(const std::string& cmd) {
         res = hid_write(dev_, txBuf, sizeof(txBuf));
         if (res < 0) {
             std::cerr << "[transport] Write failed after reopen — skipping: " << cmd << "\n";
+            hid_close(dev_);
+            dev_ = nullptr;
             return;
         }
     }

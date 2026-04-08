@@ -92,7 +92,9 @@ public:
     }
 
     void _onOutput(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        memcpy(rxBuf_, buffer, min((int)len, REPORT_SIZE));
+        uint16_t copyLen = min((int)len, REPORT_SIZE - 1);
+        memcpy(rxBuf_, buffer, copyLen);
+        rxBuf_[copyLen] = '\0';
         received_ = true;
     }
 

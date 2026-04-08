@@ -74,12 +74,13 @@ ERR back to the daemon.
 |--------------------------|---------------------------|--------|
 | `ON`  | `ACK` | Fire IR ON code for active profile |
 | `OFF` | `ACK` | Fire IR OFF code for active profile |
-| `ON` / `OFF` (unknown cmd) | `ERR` | Unknown command received |
-| `PING` | `PONG` | Daemon liveness check, triggered by button press |
+| unknown | `ERR` | Unknown command received |
 
-- `sendNEC()` is synchronous — ACK is sent only after the IR signal has fully
+- IR dispatch is synchronous — ACK is sent only after the IR signal has fully
   transmitted, so the daemon releases its inhibitor lock the instant it receives ACK.
 - No fixed delays anywhere in the pipeline.
+- Communication is daemon-initiated only. The ESP32 responds to commands but
+  does not send unsolicited reports.
 
 ### USB Device Identity
 The ESP32 presents as a vendor-defined HID device identified by VID/PID.
@@ -133,27 +134,17 @@ Factory reset rewrites `/profiles.json` from the hardcoded defaults above.
 - Press defined as release within 300ms of press
 - Hold defined as button held beyond 300ms
 
-### PING rule
-PING is only sent on the **first button press after the display was off**. Once the display is on (for any reason — button wake, config toggle, factory reset, hold cancel), all subsequent presses cycle profiles without pinging. The display turning off resets this so the next press pings again.
-
-Exception: in always-on mode the display never turns off, so the same rule applies — first press after the display last updated pings, subsequent presses cycle.
-
 ### Normal Operation — Display Always On Disabled (default)
 
 **Press 1 (display off):**
-- Display turns on
-- PING sent to daemon
-- Shows:
+- Display turns on showing:
   ```
   Profile: LG
-  Daemon: Waiting...
   ```
-- Updates to `Daemon: Connected` on PONG, or `Daemon: Not Found` on timeout
 - 2 second timer starts, display turns off after
 
 **Press 2+ (display on, within timer):**
 - Cycle to next visible profile, reset 2 second timer
-- No PING sent
 
 **IR command received:**
 - Display turns on showing `TV On` or `TV Off`
@@ -164,15 +155,13 @@ Exception: in always-on mode the display never turns off, so the same rule appli
 **Display:** OLED on continuously showing:
 ```
 Profile: LG
-Daemon: Connected
 ```
 
 **Press 1:**
-- PING sent
-- `Daemon: Waiting...` updates to `Connected` or `Not Found`
+- Show status screen
 
 **Press 2+:**
-- Cycle to next visible profile, no PING
+- Cycle to next visible profile
 
 **IR command received:**
 - Display shows `TV On` or `TV Off`
@@ -185,7 +174,7 @@ Daemon: Connected
   Enter Wireless Config Mode?
   [▓▓░░░]  ← 5 blocks, 1 per second
   ```
-- **Released before 5s:** status screen shown, next press cycles (no PING)
+- **Released before 5s:** status screen shown, next press cycles
 - **5s:** bar full → text changes to:
   ```
   Release To Enter
@@ -200,20 +189,18 @@ Daemon: Connected
 - **Released during reset bar (8s–23s):** status screen shown, next press cycles
 - **Held to 23s:** factory reset triggers automatically, status screen shown
 
-In all cases where the hold is cancelled or completes, the display shows the status screen and the next press cycles profiles (no PING).
+In all cases where the hold is cancelled or completes, the display shows the status screen and the next press cycles profiles.
 
 ### Wireless Config Mode Active
 
 **Display:** OLED on continuously (always, cannot be disabled):
 ```
 Profile: LG
-Daemon: Connected
 WiFi: Active
 ```
 
 **Press 1:**
-- PING sent
-- `Daemon: Waiting...` updates to `Connected` or `Not Found`
+- Show status screen
 
 **Press 2+:**
 - Display shows for 2 seconds:
@@ -222,7 +209,7 @@ WiFi: Active
   Wireless Mode to
   Switch Profiles
   ```
-- Reverts to status screen, no PING
+- Reverts to status screen
 
 **Hold behaviour:**
 - **300ms:** progress bar appears, text:
@@ -385,8 +372,8 @@ daemon/
 | `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. |
 | `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
 | `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
-| `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if it disappears after wake. Unchanged on both platforms. |
-| `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1. Retained for reference. |
+| `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if write fails (e.g. after wake or replug). Single-threaded — no background polling. Unchanged on both platforms. |
+| `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1 (USB CDC Serial). Moved to `daemon/archive/` — not compiled, retained for reuse on non-HID devices. |
 | `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases after ACK. |
 | `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Win32 Service API, blocks in control handler until ACK received. |
 | `main.cpp` | Entry point. Constructs transport and platform-appropriate power monitor, wires callbacks, sends ON at startup, runs event loop. |
@@ -412,7 +399,6 @@ daemon/
 ### Phase 3 — Multi-Profile, Button, WiFi Config (in progress)
 - Physical button (GPIO 5): profile cycling, config mode, factory reset ✓
 - Multi-manufacturer IR profile support stored on LittleFS as JSON ✓
-- PING/PONG daemon liveness detection (button-triggered, background reader in daemon) ✓
 - Display always-on setting ✓
 - Factory reset via button hold ✓
 - WiFi AP config mode with web UI at `192.168.4.1`
