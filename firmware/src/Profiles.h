@@ -65,6 +65,11 @@ namespace Profiles {
     // Write access to settings — call saveSettings() to persist changes
     Settings& getMutableSettings();
 
+    // Replace the in-memory profile list (e.g. from a web UI POST).
+    // Clamps the active profile index if it exceeds the new list size.
+    // Does not persist — call saveProfiles()/saveSettings() after.
+    void replaceAll(std::vector<Profile> newProfiles);
+
     // Returns the index of the next visible profile after the active one.
     // Wraps around the list. Returns the current index if no other visible
     // profiles exist (single-profile or all others hidden).

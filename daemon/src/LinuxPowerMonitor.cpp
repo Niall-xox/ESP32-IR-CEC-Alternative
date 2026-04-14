@@ -7,10 +7,9 @@ static constexpr auto LOGIND_SERVICE   = "org.freedesktop.login1";
 static constexpr auto LOGIND_OBJECT    = "/org/freedesktop/login1";
 static constexpr auto LOGIND_INTERFACE = "org.freedesktop.login1.Manager";
 
-// Phase 1 used a fixed 500ms delay here before releasing the inhibitor lock.
-// Phase 2 removes this — HIDTransport::send() blocks until ACK is received from
-// the ESP32, which is sent only after sendNEC() completes. The lock is released
-// immediately after send() returns, with no blind delay required.
+// The inhibitor lock is released immediately after send() returns.
+// HIDTransport::send() blocks until ACK is received from the ESP32, so by the
+// time the lock is released the IR signal has already been transmitted.
 
 LinuxPowerMonitor::LinuxPowerMonitor() {
     // Connect to the system bus — logind lives here, not the session bus

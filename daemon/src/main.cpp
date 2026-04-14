@@ -1,4 +1,4 @@
-// ESP32 IR Remote — PC Daemon (Phase 2)
+// ESP32 IR Remote — PC Daemon
 //
 // Monitors system power events and sends ON/OFF commands to the ESP32
 // over USB HID. Uses a systemd inhibitor lock to delay sleep and shutdown

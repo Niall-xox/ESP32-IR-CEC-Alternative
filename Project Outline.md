@@ -348,8 +348,13 @@ The daemon targets **C++17**, which is fully supported by GCC, Clang, and MSVC.
 ```
 firmware/
   platformio.ini
+  data/
+    index.html                   (Web UI served from LittleFS in WiFi mode)
   src/
     main.cpp
+    Button.h / .cpp
+    Display.h / .cpp
+    Profiles.h / .cpp
 
 daemon/
   CMakeLists.txt
@@ -361,8 +366,20 @@ daemon/
     HIDTransport.h / .cpp
     LinuxPowerMonitor.h / .cpp
     WindowsPowerMonitor.h / .cpp
-    SerialTransport.h / .cpp     (Phase 1 — retained for reference)
+  archive/
+    SerialTransport.h / .cpp     (Phase 1 — not compiled, retained for reuse on non-HID devices)
 ```
+
+### Firmware file summaries
+
+| File | Purpose |
+|------|---------|
+| `platformio.ini` | PlatformIO build config. ESP32-S3 target, TinyUSB (HID mode), LittleFS filesystem. |
+| `main.cpp` | Entry point. USB HID device setup, IR dispatch, button callbacks, WiFi/web server lifecycle. |
+| `Button.h/.cpp` | Non-blocking button input with press/hold detection and debouncing. Fires callbacks at 300ms/5s/8s/23s thresholds. |
+| `Display.h/.cpp` | OLED state management. Handles status, IR confirm, hold/reset bars, WiFi lock message with timer-based expiry. |
+| `Profiles.h/.cpp` | Manufacturer IR profile + settings storage on LittleFS. Loads/saves JSON, factory reset, profile cycle helper. |
+| `data/index.html` | Single-page web UI served in WiFi mode. Profile CRUD, settings, factory reset, save & exit. |
 
 ### Daemon file summaries
 
@@ -373,7 +390,7 @@ daemon/
 | `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
 | `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
 | `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if write fails (e.g. after wake or replug). Single-threaded — no background polling. Unchanged on both platforms. |
-| `SerialTransport.h/.cpp` | `ITransport` implementation for Phase 1 (USB CDC Serial). Moved to `daemon/archive/` — not compiled, retained for reuse on non-HID devices. |
+| `archive/SerialTransport.h/.cpp` | `ITransport` implementation for USB CDC Serial (Phase 1). Not compiled, retained for reuse on non-HID-capable devices. |
 | `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases after ACK. |
 | `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Win32 Service API, blocks in control handler until ACK received. |
 | `main.cpp` | Entry point. Constructs transport and platform-appropriate power monitor, wires callbacks, sends ON at startup, runs event loop. |
@@ -396,15 +413,16 @@ daemon/
 - Confirmed working: sleep, wake, shutdown, boot on Linux and Windows ✓
 - Windows daemon support confirmed working ✓
 
-### Phase 3 — Multi-Profile, Button, WiFi Config (in progress)
+### Phase 3 — Multi-Profile, Button, WiFi Config ✓
 - Physical button (GPIO 5): profile cycling, config mode, factory reset ✓
 - Multi-manufacturer IR profile support stored on LittleFS as JSON ✓
 - Display always-on setting ✓
 - Factory reset via button hold ✓
 - WiFi AP config mode (`ESP32-IR-Remote` / `irremote123`) at `192.168.4.1` ✓
 - Web UI for profile management and settings ✓
-- Factory reset via web UI ✓
-- Minor adjustments pending
+- Factory reset via web UI (also exits WiFi mode) ✓
+- OLED shows AP IP address in WiFi mode ✓
+- Web UI save triggers immediate OLED refresh ✓
 
 ---
 
@@ -428,4 +446,3 @@ daemon/
 ## Open Questions
 - Confirm working discrete IR codes for Samsung, Sony, TCL, Hisense
 - Assign registered VID/PID before any public or commercial release
-- Two-way communication (ESP32-initiated PC actions) — deferred to future phase

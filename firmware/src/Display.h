@@ -36,7 +36,7 @@ public:
     void showIRConfirm(bool on, bool alwaysOn, const String& profileName);
 
     // Show the hold progress bar. Called repeatedly by Button::onHold.
-    void showHoldBar(uint32_t heldMs, bool enteringWifi, bool alwaysOn, const String& profileName);
+    void showHoldBar(uint32_t heldMs, bool enteringWifi);
 
     // Show the factory reset countdown bar.
     void showResetBar(uint32_t heldMs);
@@ -54,10 +54,14 @@ public:
     // shows or hides the "WiFi: Active" line correctly.
     void setWifiActive(bool active);
 
+    // Set the AP IP address string shown on the status screen in WiFi mode.
+    void setWifiIP(const String& ip);
+
 private:
     Adafruit_SSD1306& oled_;
     bool              ok_         = false;
     bool              wifiActive_ = false;
+    String            wifiIP_;
 
     bool     timerActive_   = false;
     uint32_t timerStart_    = 0;
@@ -67,7 +71,6 @@ private:
     TimerAction timerAction_ = TimerAction::TurnOff;
 
     String lastProfile_;
-    bool   lastAlwaysOn_ = false;
 
     void drawStatus(const String& profileName);
     void drawProgressBar(uint8_t filled, uint8_t total, uint8_t y);

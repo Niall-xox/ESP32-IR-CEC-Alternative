@@ -31,8 +31,7 @@ void Display::update() {
 
 void Display::showStatus(const String& profileName, bool alwaysOn) {
     if (!ok_) return;
-    lastProfile_  = profileName;
-    lastAlwaysOn_ = alwaysOn;
+    lastProfile_ = profileName;
 
     drawStatus(profileName);
 
@@ -48,8 +47,7 @@ void Display::showStatus(const String& profileName, bool alwaysOn) {
 
 void Display::showIRConfirm(bool on, bool alwaysOn, const String& profileName) {
     if (!ok_) return;
-    lastProfile_  = profileName;
-    lastAlwaysOn_ = alwaysOn;
+    lastProfile_ = profileName;
 
     oled_.clearDisplay();
     oled_.setTextSize(2);
@@ -64,12 +62,9 @@ void Display::showIRConfirm(bool on, bool alwaysOn, const String& profileName) {
     timerAction_   = alwaysOn ? TimerAction::ShowStatus : TimerAction::TurnOff;
 }
 
-void Display::showHoldBar(uint32_t heldMs, bool enteringWifi,
-                          bool alwaysOn, const String& profileName) {
+void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     if (!ok_) return;
     timerActive_ = false;
-    lastProfile_ = profileName;
-    lastAlwaysOn_ = alwaysOn;
 
     oled_.clearDisplay();
     oled_.setTextSize(1);
@@ -152,6 +147,10 @@ void Display::setWifiActive(bool active) {
     wifiActive_ = active;
 }
 
+void Display::setWifiIP(const String& ip) {
+    wifiIP_ = ip;
+}
+
 // ---------------------------------------------------------------------------
 // Internal draw helpers
 // ---------------------------------------------------------------------------
@@ -163,13 +162,16 @@ void Display::drawStatus(const String& profileName) {
     oled_.setTextColor(SSD1306_WHITE);
 
     if (wifiActive_) {
-        // Two-line layout: profile / wifi status
+        // Three-line layout: profile / wifi status / hostname
         oled_.setCursor(0, 0);
         oled_.print("Profile: ");
         oled_.print(profileName);
 
-        oled_.setCursor(0, 12);
+        oled_.setCursor(0, 11);
         oled_.print("WiFi: Active");
+
+        oled_.setCursor(0, 22);
+        oled_.print(wifiIP_);
     } else {
         // Single line: profile name, vertically centered
         oled_.setCursor(0, 12);

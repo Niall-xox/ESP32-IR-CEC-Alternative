@@ -1,4 +1,4 @@
-// ESP32 IR Remote — Firmware (Phase 3)
+// ESP32 IR Remote — Firmware
 //
 // Presents the ESP32-S3 as a USB HID device. Receives commands from the PC
 // daemon as HID output reports, fires the IR signal for the active manufacturer
@@ -144,8 +144,9 @@ void stopWifi();
 void startWifi() {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(WIFI_SSID, WIFI_PASS);
-    Serial.printf("[wifi] AP started — SSID: %s  IP: %s\n",
-                  WIFI_SSID, WiFi.softAPIP().toString().c_str());
+    String apIP = WiFi.softAPIP().toString();
+    Serial.printf("[wifi] AP started — SSID: %s  IP: %s\n", WIFI_SSID, apIP.c_str());
+    display.setWifiIP(apIP);
 
     // --- API endpoints ---
 
@@ -192,15 +193,10 @@ void startWifi() {
             server.send(400, "application/json", "{\"error\":\"At least one profile required\"}");
             return;
         }
-        // Overwrite in-memory state via Profiles API
-        auto& all = const_cast<std::vector<Profile>&>(Profiles::getAll());
-        all = std::move(newProfiles);
-        // Clamp active profile
-        if (Profiles::getSettings().activeProfile >= (int)Profiles::getAll().size()) {
-            Profiles::getMutableSettings().activeProfile = 0;
-        }
+        Profiles::replaceAll(std::move(newProfiles));
         Profiles::saveProfiles();
         Profiles::saveSettings();
+        display.showStatus(Profiles::getActive().name, true);
         server.send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -234,13 +230,15 @@ void startWifi() {
             s.displayAlwaysOn = doc["display_always_on"].as<bool>();
         }
         Profiles::saveSettings();
+        display.showStatus(Profiles::getActive().name, true);
         server.send(200, "application/json", "{\"ok\":true}");
     });
 
-    // POST /api/factory-reset — restore defaults
+    // POST /api/factory-reset — restore defaults and exit WiFi mode
     server.on("/api/factory-reset", HTTP_POST, []() {
         Profiles::factoryReset();
         server.send(200, "application/json", "{\"ok\":true}");
+        wifiActive = false;  // Deferred WiFi stop via loop()
     });
 
     // POST /api/exit — save and exit wireless config mode
@@ -281,6 +279,18 @@ void stopWifi() {
     Serial.println("[wifi] AP stopped");
 }
 
+// Shared cleanup after leaving WiFi mode — stops WiFi, updates display,
+// and resets the press counter. Used by button exit, factory reset, and
+// the deferred exit/factory-reset from the web UI.
+void finishExitWifi() {
+    if (WiFi.getMode() != WIFI_OFF) stopWifi();
+    wifiActive = false;
+    display.setWifiActive(false);
+    display.showStatus(Profiles::getActive().name,
+                       Profiles::getSettings().displayAlwaysOn);
+    pressCount = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Button callbacks
 // ---------------------------------------------------------------------------
@@ -318,7 +328,6 @@ void onButtonPress() {
 void onButtonHold(uint32_t heldMs) {
     // A hold cancels any in-progress press sequence
     pressCount = 0;
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
 
     if (heldMs >= 23000) {
         // Factory reset has already triggered — stop updating the display so
@@ -329,35 +338,28 @@ void onButtonHold(uint32_t heldMs) {
     } else if (heldMs >= 5000) {
         display.showConfigRelease(!wifiActive);
     } else {
-        display.showHoldBar(heldMs, !wifiActive, alwaysOn, Profiles::getActive().name);
+        display.showHoldBar(heldMs, !wifiActive);
     }
 }
 
 void onConfigThreshold() {
     // Button released at 5s — toggle WiFi config mode
-    wifiActive = !wifiActive;
-    display.setWifiActive(wifiActive);
-
     if (wifiActive) {
-        startWifi();
+        finishExitWifi();
     } else {
-        stopWifi();
+        wifiActive = true;
+        display.setWifiActive(true);
+        startWifi();
+        // In WiFi mode the status screen is always-on
+        display.showStatus(Profiles::getActive().name, true);
+        pressCount = 1;
     }
-
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
-    display.showStatus(Profiles::getActive().name, alwaysOn);
-    pressCount = 1;
 }
 
 void onFactoryReset() {
     Serial.println("[app] Factory reset triggered");
     Profiles::factoryReset();
-    if (wifiActive) stopWifi();
-    wifiActive = false;
-    display.setWifiActive(false);
-    bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
-    display.showStatus(Profiles::getActive().name, alwaysOn);
-    pressCount = 1;
+    finishExitWifi();
 }
 
 // ---------------------------------------------------------------------------
@@ -410,12 +412,9 @@ void loop() {
     if (wifiActive) {
         server.handleClient();
     } else if (WiFi.getMode() != WIFI_OFF) {
-        // Deferred stop from /api/exit — response has been sent, now shut down
-        stopWifi();
-        display.setWifiActive(false);
-        bool alwaysOn = Profiles::getSettings().displayAlwaysOn;
-        display.showStatus(Profiles::getActive().name, alwaysOn);
-        pressCount = 1;
+        // Deferred stop from /api/exit or /api/factory-reset —
+        // response has been sent, now shut down and return to normal.
+        finishExitWifi();
     }
 
     if (!hidDevice.received_) return;

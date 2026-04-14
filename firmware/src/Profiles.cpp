@@ -192,6 +192,13 @@ int nextVisibleIndex() {
     return start;
 }
 
+void replaceAll(std::vector<Profile> newProfiles) {
+    profiles_ = std::move(newProfiles);
+    if (settings_.activeProfile >= (int)profiles_.size()) {
+        settings_.activeProfile = 0;
+    }
+}
+
 void saveProfiles() {
     JsonDocument doc;
     JsonArray    arr = doc.to<JsonArray>();
