@@ -13,6 +13,7 @@
 // as they guarantee the correct TV state regardless of prior state.
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -52,12 +53,16 @@ namespace Profiles {
 
     // Initialise LittleFS and load profiles and settings into memory.
     // Writes /profiles.json and /settings.json from hardcoded defaults
-    // on first boot if the files do not already exist.
-    // Returns false if LittleFS fails to mount — firmware should log and
-    // continue, IR commands will not work without a loaded profile.
+    // on first boot if the files do not already exist, and again if the
+    // stored file is present but unreadable (corrupt or truncated).
+    // Returns false only if LittleFS itself fails to mount — in that case
+    // getActive() falls back to a safe built-in profile so the firmware
+    // stays responsive, but IR codes cannot be changed or persisted.
     bool begin();
 
-    // Read access to loaded data
+    // Read access to loaded data.
+    // getActive() never returns a dangling reference — if the profile list is
+    // empty (LittleFS unavailable) it returns a static built-in fallback.
     const std::vector<Profile>& getAll();
     const Profile&               getActive();
     const Settings&              getSettings();
@@ -82,6 +87,12 @@ namespace Profiles {
     // Overwrite /profiles.json and /settings.json from hardcoded defaults,
     // then reload into memory. Called by button hold and web UI factory reset.
     void factoryReset();
+
+    // Build a Profile from a JSON object, as stored in /profiles.json or sent
+    // by the web UI. Missing or malformed fields fall back to safe defaults
+    // rather than being parsed blindly — an absent "on"/"off" key yields 0x0,
+    // an unknown protocol yields NEC.
+    Profile fromJson(JsonObjectConst obj);
 
     // Protocol string conversion — used when reading/writing JSON
     IrProtocol protocolFromString(const String& s);

@@ -22,11 +22,9 @@ void Button::update() {
 
     // --- Falling edge: button just went down ---
     if (raw && !pressed_) {
-        pressed_     = true;
-        holdFired_   = false;
-        configFired_ = false;
-        resetFired_  = false;
-        pressTime_   = millis();
+        pressed_    = true;
+        resetFired_ = false;
+        pressTime_  = millis();
         return;
     }
 
@@ -62,18 +60,13 @@ void Button::update() {
 
         // Once past the press threshold, begin the hold phase
         if (held >= PRESS_MAX_MS) {
-            holdFired_ = true;
-
             // Fire onHold every update() so the display can draw the progress bar
             if (onHold) onHold(held);
 
-            // Config threshold reached — flag it so release handler knows
-            if (held >= CONFIG_MS && !configFired_) {
-                configFired_ = true;
-                // Don't fire the callback here — fire on release so the user
-                // sees "Release to Enter Wireless Config!" and acts deliberately.
-                // The release handler checks configFired_ to know what to do.
-            }
+            // The config threshold deliberately has no callback here — entering
+            // config mode fires on release instead, so the user sees "Release To
+            // Enter Wireless Config!" and acts on it. The release handler works
+            // out what to do from the elapsed hold time alone.
 
             // Factory reset: auto-triggers at 23s, no release needed
             if (held >= RESET_TRIGGER_MS && !resetFired_) {

@@ -15,7 +15,12 @@ public:
     // Writes cmd + '\n' to the serial port.
     // If the write fails (e.g. port disappeared after system resume), the port
     // is reopened and the write retried until it succeeds or the timeout expires.
-    void send(const std::string& cmd) override;
+    //
+    // Phase 1 was one-way: the ESP32 sent no response, so a successful write is
+    // the only confirmation available. Returns true once the bytes are written —
+    // this is weaker than HIDTransport's ACK, which confirms the IR signal has
+    // actually been transmitted.
+    bool send(const std::string& cmd) override;
 
 private:
     // Opens and configures the port. Returns true on success.

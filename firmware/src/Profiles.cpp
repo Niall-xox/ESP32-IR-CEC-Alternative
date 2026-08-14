@@ -50,10 +50,51 @@ static void codeToHex(uint32_t code, char* buf, size_t len) {
     snprintf(buf, len, "0x%08X", code);
 }
 
-// Write the hardcoded default profiles to /profiles.json.
-static void writeDefaultProfiles() {
-    JsonDocument doc;
-    JsonArray    arr = doc.to<JsonArray>();
+// Serialise a document to `path` without ever leaving a half-written file
+// behind.
+//
+// Opening the destination with "w" truncates it immediately, so losing power
+// mid-write left a truncated file that failed to parse on the next boot. Every
+// profile cycle triggers a save, so that window was hit often enough to matter.
+// Writing to a temporary file first and renaming means the destination is only
+// ever replaced once the new contents are safely on flash — a power loss leaves
+// either the old file or the new one, never a partial one.
+static bool writeJsonAtomic(const char* path, const JsonDocument& doc) {
+    const String tmpPath = String(path) + ".tmp";
+
+    File f = LittleFS.open(tmpPath.c_str(), "w");
+    if (!f) {
+        Serial.printf("[profiles] Failed to open %s for write\n", tmpPath.c_str());
+        return false;
+    }
+
+    const size_t written = serializeJson(doc, f);
+    f.close();
+
+    if (written == 0) {
+        Serial.printf("[profiles] Wrote 0 bytes to %s — discarding\n", tmpPath.c_str());
+        LittleFS.remove(tmpPath.c_str());
+        return false;
+    }
+
+    // littlefs replaces the destination atomically, but some ports refuse to
+    // rename onto an existing path — fall back to an explicit remove.
+    // c_str() on both arguments avoids an ambiguous String/const char* overload.
+    if (!LittleFS.rename(tmpPath.c_str(), path)) {
+        LittleFS.remove(path);
+        if (!LittleFS.rename(tmpPath.c_str(), path)) {
+            Serial.printf("[profiles] Failed to rename %s onto %s\n", tmpPath.c_str(), path);
+            LittleFS.remove(tmpPath.c_str());
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Serialise the hardcoded default profiles into a document.
+static void buildDefaultProfilesDoc(JsonDocument& doc) {
+    JsonArray arr = doc.to<JsonArray>();
 
     for (const auto& d : DEFAULT_PROFILES) {
         JsonObject obj = arr.add<JsonObject>();
@@ -66,11 +107,13 @@ static void writeDefaultProfiles() {
         obj["off"]      = offBuf;
         obj["visible"]  = d.visible;
     }
+}
 
-    File f = LittleFS.open("/profiles.json", "w");
-    if (!f) { Serial.println("[profiles] Failed to open profiles.json for write"); return; }
-    serializeJson(doc, f);
-    f.close();
+// Write the hardcoded default profiles to /profiles.json.
+static void writeDefaultProfiles() {
+    JsonDocument doc;
+    buildDefaultProfilesDoc(doc);
+    writeJsonAtomic("/profiles.json", doc);
 }
 
 // Write the hardcoded default settings to /settings.json.
@@ -78,11 +121,7 @@ static void writeDefaultSettings() {
     JsonDocument doc;
     doc["active_profile"]    = DEFAULT_SETTINGS.activeProfile;
     doc["display_always_on"] = DEFAULT_SETTINGS.displayAlwaysOn;
-
-    File f = LittleFS.open("/settings.json", "w");
-    if (!f) { Serial.println("[profiles] Failed to open settings.json for write"); return; }
-    serializeJson(doc, f);
-    f.close();
+    writeJsonAtomic("/settings.json", doc);
 }
 
 // Read /profiles.json into profiles_.
@@ -101,15 +140,8 @@ static void loadProfiles() {
         return;
     }
 
-    for (JsonObject obj : doc.as<JsonArray>()) {
-        Profile p;
-        p.name     = obj["name"].as<String>();
-        p.protocol = Profiles::protocolFromString(obj["protocol"].as<String>());
-        // Codes are stored as hex strings ("0x20DF23DC") — parse back to uint32_t
-        p.onCode   = strtoul(obj["on"].as<const char*>(),  nullptr, 16);
-        p.offCode  = strtoul(obj["off"].as<const char*>(), nullptr, 16);
-        p.visible  = obj["visible"] | true;  // Default to visible if field missing
-        profiles_.push_back(p);
+    for (JsonObjectConst obj : doc.as<JsonArrayConst>()) {
+        profiles_.push_back(Profiles::fromJson(obj));
     }
 
     Serial.printf("[profiles] Loaded %d profiles\n", (int)profiles_.size());
@@ -150,7 +182,7 @@ namespace Profiles {
 bool begin() {
     // true = format LittleFS if mounting fails (e.g. first flash after partition change)
     if (!LittleFS.begin(true)) {
-        Serial.println("[profiles] LittleFS mount failed");
+        Serial.println("[profiles] LittleFS mount failed — running on fallback profile");
         return false;
     }
 
@@ -165,16 +197,52 @@ bool begin() {
     }
 
     loadProfiles();
+
+    // A present but unreadable profiles.json (corrupt, truncated, or hand-edited
+    // down to an empty array) leaves nothing to select. Rewrite the defaults and
+    // retry rather than continuing with no profiles at all.
+    if (profiles_.empty()) {
+        Serial.println("[profiles] No profiles loaded — restoring defaults");
+        writeDefaultProfiles();
+        loadProfiles();
+    }
+
+    // Load settings after profiles so the active index can be range-checked.
     loadSettings();
 
     Serial.printf("[profiles] Active profile: %d (%s)\n",
                   settings_.activeProfile,
-                  profiles_.empty() ? "none" : profiles_[settings_.activeProfile].name.c_str());
-    return true;
+                  getActive().name.c_str());
+    return !profiles_.empty();
 }
 
 const std::vector<Profile>& getAll()     { return profiles_; }
-const Profile&               getActive() { return profiles_[settings_.activeProfile]; }
+
+const Profile& getActive() {
+    // Returned by reference, so this must stay valid even with no profiles
+    // loaded — a failed LittleFS mount leaves the list empty and indexing it
+    // would read out of bounds. The fallback keeps the device responsive
+    // (display, button, HID all still work) on the one confirmed profile.
+    static const Profile FALLBACK = {
+        String(DEFAULT_PROFILES[0].name),
+        protocolFromString(String(DEFAULT_PROFILES[0].protocol)),
+        DEFAULT_PROFILES[0].onCode,
+        DEFAULT_PROFILES[0].offCode,
+        true
+    };
+
+    if (profiles_.empty()) return FALLBACK;
+
+    // Defensive: settings_.activeProfile is clamped on load and on every write
+    // path, but a stale index here would be an out-of-bounds read.
+    if (settings_.activeProfile < 0 ||
+        settings_.activeProfile >= (int)profiles_.size()) {
+        return profiles_[0];
+    }
+
+    return profiles_[settings_.activeProfile];
+}
+
 const Settings&              getSettings()        { return settings_; }
 Settings&                    getMutableSettings()  { return settings_; }
 
@@ -215,11 +283,9 @@ void saveProfiles() {
         obj["visible"]  = p.visible;
     }
 
-    File f = LittleFS.open("/profiles.json", "w");
-    if (!f) { Serial.println("[profiles] Failed to save profiles.json"); return; }
-    serializeJson(doc, f);
-    f.close();
-    Serial.println("[profiles] Saved profiles.json");
+    if (writeJsonAtomic("/profiles.json", doc)) {
+        Serial.println("[profiles] Saved profiles.json");
+    }
 }
 
 void saveSettings() {
@@ -227,11 +293,9 @@ void saveSettings() {
     doc["active_profile"]    = settings_.activeProfile;
     doc["display_always_on"] = settings_.displayAlwaysOn;
 
-    File f = LittleFS.open("/settings.json", "w");
-    if (!f) { Serial.println("[profiles] Failed to save settings.json"); return; }
-    serializeJson(doc, f);
-    f.close();
-    Serial.println("[profiles] Saved settings.json");
+    if (writeJsonAtomic("/settings.json", doc)) {
+        Serial.println("[profiles] Saved settings.json");
+    }
 }
 
 void factoryReset() {
@@ -241,6 +305,25 @@ void factoryReset() {
     loadProfiles();
     loadSettings();
     Serial.println("[profiles] Factory reset complete");
+}
+
+Profile fromJson(JsonObjectConst obj) {
+    Profile p;
+    p.name     = obj["name"].as<String>();
+    p.protocol = protocolFromString(obj["protocol"].as<String>());
+
+    // Codes are stored as hex strings ("0x20DF23DC") — parse back to uint32_t.
+    // as<const char*>() yields nullptr when the key is missing or is not a
+    // string, and strtoul(nullptr, ...) is undefined behaviour, so both are
+    // checked before parsing. An unset code becomes 0x0, matching the
+    // "not yet configured" placeholder convention used by the defaults.
+    const char* onStr  = obj["on"].as<const char*>();
+    const char* offStr = obj["off"].as<const char*>();
+    p.onCode   = onStr  ? (uint32_t)strtoul(onStr,  nullptr, 16) : 0;
+    p.offCode  = offStr ? (uint32_t)strtoul(offStr, nullptr, 16) : 0;
+
+    p.visible  = obj["visible"] | true;  // Default to visible if field missing
+    return p;
 }
 
 IrProtocol protocolFromString(const String& s) {

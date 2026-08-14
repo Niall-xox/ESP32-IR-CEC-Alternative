@@ -13,7 +13,14 @@ class ITransport {
 public:
     // Send a command string to the ESP32.
     // Implementations handle any framing required by the protocol (e.g. '\n').
-    virtual void send(const std::string& cmd) = 0;
+    //
+    // Returns true only if the device confirmed the command was carried out —
+    // for HIDTransport that means an ACK was received, which in turn means the
+    // IR signal has finished transmitting. Returns false if the device was
+    // missing, the write failed, the response timed out, or the device replied
+    // ERR. A false return must not stop the caller from proceeding: the system
+    // still has to be allowed to sleep or shut down.
+    virtual bool send(const std::string& cmd) = 0;
 
     virtual ~ITransport() = default;
 };

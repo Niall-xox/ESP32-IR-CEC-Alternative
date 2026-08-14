@@ -111,7 +111,13 @@ public:
         return HID.SendReport(0, data, REPORT_SIZE);
     }
 
-    bool    received_           = false;
+    // Written by _onOutput() on the TinyUSB task, read by loop() on the Arduino
+    // task. volatile stops the compiler from caching received_ in a register
+    // and never observing the change. The protocol is strictly request/response
+    // — the daemon sends one command and waits for the reply before sending
+    // another — so there is no window for a second report to overwrite rxBuf_
+    // while loop() is reading it.
+    volatile bool received_     = false;
     uint8_t rxBuf_[REPORT_SIZE] = {0};
 };
 
@@ -178,16 +184,12 @@ void startWifi() {
             server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
             return;
         }
-        // Replace in-memory profiles and save
+        // Replace in-memory profiles and save. Profiles::fromJson performs the
+        // same validation used when loading from LittleFS, so a request with
+        // missing or malformed fields yields safe defaults instead of crashing.
         std::vector<Profile> newProfiles;
-        for (JsonObject obj : doc.as<JsonArray>()) {
-            Profile p;
-            p.name     = obj["name"].as<String>();
-            p.protocol = Profiles::protocolFromString(obj["protocol"].as<String>());
-            p.onCode   = strtoul(obj["on"].as<const char*>(), nullptr, 16);
-            p.offCode  = strtoul(obj["off"].as<const char*>(), nullptr, 16);
-            p.visible  = obj["visible"] | true;
-            newProfiles.push_back(p);
+        for (JsonObjectConst obj : doc.as<JsonArrayConst>()) {
+            newProfiles.push_back(Profiles::fromJson(obj));
         }
         if (newProfiles.empty()) {
             server.send(400, "application/json", "{\"error\":\"At least one profile required\"}");
@@ -219,14 +221,16 @@ void startWifi() {
             server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
             return;
         }
+        // is<T>() replaces the deprecated containsKey() in ArduinoJson 7 and
+        // additionally rejects a key that is present but of the wrong type.
         Settings& s = Profiles::getMutableSettings();
-        if (doc.containsKey("active_profile")) {
+        if (doc["active_profile"].is<int>()) {
             int idx = doc["active_profile"].as<int>();
             if (idx >= 0 && idx < (int)Profiles::getAll().size()) {
                 s.activeProfile = idx;
             }
         }
-        if (doc.containsKey("display_always_on")) {
+        if (doc["display_always_on"].is<bool>()) {
             s.displayAlwaysOn = doc["display_always_on"].as<bool>();
         }
         Profiles::saveSettings();
@@ -368,7 +372,12 @@ void onFactoryReset() {
 void setup() {
     Serial.begin(115200);
 
-    Profiles::begin();
+    // A false return means LittleFS is unavailable, so profiles cannot be
+    // loaded or persisted. The device stays usable on the built-in fallback
+    // profile — worth logging loudly, but not worth halting for.
+    if (!Profiles::begin()) {
+        Serial.println("[app] Profile storage unavailable — using fallback profile");
+    }
 
     Wire.begin(OLED_SDA, OLED_SCL);
     if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {

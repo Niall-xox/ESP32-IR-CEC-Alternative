@@ -67,7 +67,7 @@ button:active { opacity: 0.7; }
   <div class="toggle-row">
     <label>Display Always On</label>
     <label class="switch">
-      <input type="checkbox" id="alwaysOn" onchange="settingsChanged=true">
+      <input type="checkbox" id="alwaysOn">
       <span class="slider"></span>
     </label>
   </div>
@@ -83,7 +83,6 @@ button:active { opacity: 0.7; }
 <script>
 let profiles = [];
 let settings = {};
-let settingsChanged = false;
 
 async function load() {
   try {
@@ -184,16 +183,25 @@ async function save() {
     showStatus('Saving...');
     settings.display_always_on = document.getElementById('alwaysOn').checked;
 
-    const [pRes, sRes] = await Promise.all([
-      fetch('/api/profiles', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(profiles) }),
-      fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(settings) })
-    ]);
+    // Sent sequentially, not in parallel. /api/settings range-checks
+    // active_profile against the profile list currently on the device, so the
+    // new list has to be stored first — otherwise deleting a profile can have
+    // the index validated against the old list and select the wrong one.
+    const pRes = await fetch('/api/profiles', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(profiles)
+    });
+    if (!pRes.ok) throw new Error('Save failed');
 
-    if (!pRes.ok || !sRes.ok) throw new Error('Save failed');
+    const sRes = await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(settings)
+    });
+    if (!sRes.ok) throw new Error('Save failed');
+
     showStatus('Saved');
-    settingsChanged = false;
+    return true;
   } catch (e) {
     showStatus('Save failed', true);
+    return false;
   }
 }
 
@@ -209,8 +217,10 @@ async function factoryReset() {
     showStatus('Resetting...');
     const res = await fetch('/api/factory-reset', { method: 'POST' });
     if (!res.ok) throw new Error();
-    await load();
-    showStatus('Factory reset complete');
+    // A factory reset also exits wireless config mode, so the access point is
+    // already shutting down. Reloading here would always fail and report the
+    // reset as broken when it had in fact succeeded.
+    showStatus('Factory reset complete. WiFi shutting down — you can close this page.', false, true);
   } catch (e) {
     showStatus('Factory reset failed', true);
   }
@@ -218,20 +228,24 @@ async function factoryReset() {
 
 async function saveAndExit() {
   try {
-    await save();
+    // Only exit if the save actually succeeded — otherwise the AP shuts down
+    // and the unsaved changes are lost with no way back in.
+    if (!(await save())) return;
     showStatus('Exiting wireless mode...');
     await fetch('/api/exit', { method: 'POST' });
-    showStatus('WiFi shutting down. You can close this page.');
+    showStatus('WiFi shutting down. You can close this page.', false, true);
   } catch (e) {
     showStatus('Failed', true);
   }
 }
 
-function showStatus(msg, isError) {
+// persist = true for messages that must stay on screen, used when the access
+// point is shutting down and this is the last thing the user will see.
+function showStatus(msg, isError, persist) {
   const el = document.getElementById('status');
   el.textContent = msg;
   el.className = 'status' + (isError ? ' error' : '');
-  if (!isError && msg !== 'Saving...' && msg !== 'Restoring...' && msg !== 'Resetting...') {
+  if (!isError && !persist && msg !== 'Saving...' && msg !== 'Restoring...' && msg !== 'Resetting...') {
     setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
   }
 }

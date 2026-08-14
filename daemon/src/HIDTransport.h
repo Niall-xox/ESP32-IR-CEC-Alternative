@@ -14,14 +14,15 @@
 // returns, knowing the IR signal has actually been transmitted.
 //
 // If the device is not present or has been unplugged, send() attempts to
-// reopen it. If that fails, it logs a warning and returns silently so the
-// system can still sleep or shut down normally.
+// reopen it. If that fails it logs a warning and returns false rather than
+// throwing, so the system can still sleep or shut down normally.
 class HIDTransport : public ITransport {
 public:
     HIDTransport(uint16_t vid, uint16_t pid);
     ~HIDTransport() override;
 
-    void send(const std::string& cmd) override;
+    // Returns true only once an ACK has been received — see ITransport::send.
+    bool send(const std::string& cmd) override;
 
 private:
     bool tryOpenDevice(std::chrono::seconds timeout);

@@ -48,6 +48,7 @@ void Display::showStatus(const String& profileName, bool alwaysOn) {
 void Display::showIRConfirm(bool on, bool alwaysOn, const String& profileName) {
     if (!ok_) return;
     lastProfile_ = profileName;
+    resetBarCache();
 
     oled_.clearDisplay();
     oled_.setTextSize(2);
@@ -66,6 +67,17 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     if (!ok_) return;
     timerActive_ = false;
 
+    // 5-block bar filling from 300ms to 5000ms
+    uint32_t elapsed = heldMs > 300 ? heldMs - 300 : 0;
+    uint8_t  filled  = (uint8_t)((elapsed * 5) / (CONFIG_MS - 300));
+    if (filled > 5) filled = 5;
+
+    // Nothing visible has changed since the last call — skip the I2C transfer.
+    if (barKind_ == BarKind::Hold && barFilled_ == filled && barFlag_ == enteringWifi) return;
+    barKind_   = BarKind::Hold;
+    barFilled_ = filled;
+    barFlag_   = enteringWifi;
+
     oled_.clearDisplay();
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);
@@ -73,10 +85,6 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     oled_.setCursor(0, 0);
     oled_.print(enteringWifi ? "Enter Wireless Config?" : "Exit Wireless Config?");
 
-    // 5-block bar filling from 300ms to 5000ms
-    uint32_t elapsed = heldMs > 300 ? heldMs - 300 : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 5) / (CONFIG_MS - 300));
-    if (filled > 5) filled = 5;
     drawProgressBar(filled, 5, 20);
 
     oled_.display();
@@ -86,6 +94,16 @@ void Display::showResetBar(uint32_t heldMs) {
     if (!ok_) return;
     timerActive_ = false;
 
+    // 15-segment bar filling from 8s to 23s
+    uint32_t elapsed = heldMs > RESET_START_MS ? heldMs - RESET_START_MS : 0;
+    uint8_t  filled  = (uint8_t)((elapsed * 15) / (RESET_END_MS - RESET_START_MS));
+    if (filled > 15) filled = 15;
+
+    // Nothing visible has changed since the last call — skip the I2C transfer.
+    if (barKind_ == BarKind::Reset && barFilled_ == filled) return;
+    barKind_   = BarKind::Reset;
+    barFilled_ = filled;
+
     oled_.clearDisplay();
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);
@@ -93,10 +111,6 @@ void Display::showResetBar(uint32_t heldMs) {
     oled_.setCursor(0, 0);
     oled_.print("Hold To Factory Reset");
 
-    // 15-segment bar filling from 8s to 23s
-    uint32_t elapsed = heldMs > RESET_START_MS ? heldMs - RESET_START_MS : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 15) / (RESET_END_MS - RESET_START_MS));
-    if (filled > 15) filled = 15;
     drawProgressBar(filled, 15, 20);
 
     oled_.display();
@@ -105,6 +119,7 @@ void Display::showResetBar(uint32_t heldMs) {
 void Display::showConfigRelease(bool entering) {
     if (!ok_) return;
     timerActive_ = false;
+    resetBarCache();
 
     oled_.clearDisplay();
     oled_.setTextSize(1);
@@ -118,6 +133,7 @@ void Display::showConfigRelease(bool entering) {
 
 void Display::showWifiLockMessage() {
     if (!ok_) return;
+    resetBarCache();
 
     oled_.clearDisplay();
     oled_.setTextSize(1);
@@ -139,6 +155,7 @@ void Display::showWifiLockMessage() {
 void Display::off() {
     if (!ok_) return;
     timerActive_ = false;
+    resetBarCache();
     oled_.clearDisplay();
     oled_.display();
 }
@@ -155,8 +172,16 @@ void Display::setWifiIP(const String& ip) {
 // Internal draw helpers
 // ---------------------------------------------------------------------------
 
+// Invalidate the progress bar cache so the next bar screen always redraws.
+// Called by every screen that overwrites a bar.
+void Display::resetBarCache() {
+    barKind_   = BarKind::None;
+    barFilled_ = -1;
+}
+
 void Display::drawStatus(const String& profileName) {
     if (!ok_) return;
+    resetBarCache();
     oled_.clearDisplay();
     oled_.setTextSize(1);
     oled_.setTextColor(SSD1306_WHITE);

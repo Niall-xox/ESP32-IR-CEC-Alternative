@@ -38,11 +38,11 @@ bool HIDTransport::tryOpenDevice(std::chrono::seconds timeout) {
     }
 }
 
-void HIDTransport::send(const std::string& cmd) {
+bool HIDTransport::send(const std::string& cmd) {
     if (!dev_) {
         if (!tryOpenDevice(STARTUP_OPEN_TIMEOUT)) {
             std::cerr << "[transport] ESP32 not found — skipping IR command: " << cmd << "\n";
-            return;
+            return false;
         }
         std::cout << "[transport] HID device opened (VID="
                   << std::hex << vid_ << " PID=" << pid_ << std::dec << ")\n";
@@ -59,14 +59,14 @@ void HIDTransport::send(const std::string& cmd) {
         dev_ = nullptr;
         if (!tryOpenDevice(REOPEN_TIMEOUT)) {
             std::cerr << "[transport] ESP32 not found after reopen — skipping: " << cmd << "\n";
-            return;
+            return false;
         }
         res = hid_write(dev_, txBuf, sizeof(txBuf));
         if (res < 0) {
             std::cerr << "[transport] Write failed after reopen — skipping: " << cmd << "\n";
             hid_close(dev_);
             dev_ = nullptr;
-            return;
+            return false;
         }
     }
 
@@ -75,16 +75,17 @@ void HIDTransport::send(const std::string& cmd) {
 
     if (res <= 0) {
         std::cerr << "[transport] No response received for command: " << cmd << "\n";
-        return;
+        return false;
     }
 
     if (rxBuf[0] == 'A' && rxBuf[1] == 'C' && rxBuf[2] == 'K') {
-        return;  // success
+        return true;  // IR signal confirmed transmitted
     }
     if (rxBuf[0] == 'E' && rxBuf[1] == 'R' && rxBuf[2] == 'R') {
         std::cerr << "[transport] ESP32 returned ERR for command: " << cmd << "\n";
-        return;
+        return false;
     }
 
     std::cerr << "[transport] Unexpected response for command: " << cmd << "\n";
+    return false;
 }

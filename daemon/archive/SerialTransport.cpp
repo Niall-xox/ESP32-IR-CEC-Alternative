@@ -61,7 +61,7 @@ void SerialTransport::configurePort() {
     tcsetattr(fd_, TCSANOW, &options);
 }
 
-void SerialTransport::send(const std::string& cmd) {
+bool SerialTransport::send(const std::string& cmd) {
     std::string msg = cmd + "\n";
 
     auto deadline = std::chrono::steady_clock::now() + REOPEN_TIMEOUT;
@@ -69,7 +69,7 @@ void SerialTransport::send(const std::string& cmd) {
     while (true) {
         if (fd_ >= 0) {
             ssize_t written = write(fd_, msg.c_str(), msg.size());
-            if (written > 0) return;  // success
+            if (written > 0) return true;  // bytes written — no ACK exists in Phase 1
 
             // Write failed — port went stale (e.g. USB disconnected during sleep)
             std::cerr << "[transport] Write failed, port stale — reopening\n";

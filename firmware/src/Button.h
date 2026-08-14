@@ -48,8 +48,6 @@ private:
     bool     pullup_;
     bool     lastRaw_       = false;  // Raw pin state last update
     bool     pressed_       = false;  // True while button is physically down
-    bool     holdFired_     = false;  // True once hold phase has begun
-    bool     configFired_   = false;  // True once config threshold callback has fired
     bool     resetFired_    = false;  // True once factory reset callback has fired
     uint32_t pressTime_     = 0;      // millis() when button went down
     uint32_t lastDebounce_  = 0;      // millis() of last state change (for debounce)

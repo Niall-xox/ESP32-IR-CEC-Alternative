@@ -72,6 +72,19 @@ private:
 
     String lastProfile_;
 
+    // Progress bar redraw cache.
+    //
+    // Button::onHold fires on every loop() iteration, so the bar screens were
+    // pushing a full 128x32 frame over I2C hundreds of times per second to draw
+    // a bar that only has 5 (or 15) distinct states. These track what is
+    // currently on screen so a redraw is skipped unless something visibly
+    // changed. Cleared by every non-bar screen via resetBarCache().
+    enum class BarKind : uint8_t { None, Hold, Reset };
+    BarKind barKind_    = BarKind::None;
+    int16_t barFilled_  = -1;
+    bool    barFlag_    = false;  // Hold bar only: entering (true) vs exiting (false)
+
+    void resetBarCache();
     void drawStatus(const String& profileName);
     void drawProgressBar(uint8_t filled, uint8_t total, uint8_t y);
 

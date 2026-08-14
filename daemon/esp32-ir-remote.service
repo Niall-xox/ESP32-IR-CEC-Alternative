@@ -12,6 +12,34 @@ ExecStart=/usr/local/bin/esp32-ir-daemon
 Restart=on-failure
 RestartSec=5
 
+# Run unprivileged. The daemon only needs to open the ESP32's /dev/hidraw node
+# and talk to logind on the system bus — neither requires root once
+# 99-esp32-ir-remote.rules has granted the esp32ir group access to the device.
+# See that file for the user/group creation commands.
+User=esp32ir
+Group=esp32ir
+
+# --- Sandboxing ---
+# The daemon reads no files, writes nothing, and makes no network connections,
+# so almost everything can be closed off. If the daemon ever fails to reach
+# D-Bus after a change here, ProtectSystem is the first directive to relax.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+# AF_UNIX is required for the D-Bus system bus socket. No other family is used.
+RestrictAddressFamilies=AF_UNIX
+# Setting DeviceAllow implies DevicePolicy=closed, restricting the daemon to
+# hidraw plus the standard pseudo-devices (null, zero, random, urandom, tty).
+DeviceAllow=char-hidraw rw
+
 [Install]
 # Start automatically when the system reaches the normal multi-user state
 WantedBy=multi-user.target

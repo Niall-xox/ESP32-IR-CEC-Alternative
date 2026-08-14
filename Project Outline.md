@@ -28,6 +28,14 @@ robust and network-independent.
 - **OLED display (128×32, SSD1306)** — provides status feedback (SDA: GPIO 2, SCL: GPIO 3)
 - **Tactile button** — profile cycling, config mode, factory reset (GPIO 5, GND)
 
+**On the board name.** PlatformIO has no board definition for the ESP32-S3
+SuperMini, so `platformio.ini` builds for `lolin_s3_mini` as a close-enough
+match — same ESP32-S3 target, and the pin assignments above are set explicitly
+in the firmware rather than inherited from the board definition. This is
+deliberate, not an oversight. The CAD directory likewise models the housing
+around an `ESP32-S3_Zero.step`, another similarly-sized S3 board used as a
+stand-in.
+
 ---
 
 ## Architecture
@@ -66,6 +74,8 @@ ERR back to the daemon.
 - Daemon waited a fixed 500ms delay before releasing the inhibitor lock.
 
 ### Phase 2 (current) — Two-way, ACK-based
+Still the current wire format. Phase 3 added profiles, the button and WiFi
+config on top of it without changing the protocol.
 - Transport: USB HID (64-byte vendor-defined reports)
 - Daemon → ESP32: 64-byte output report, command string in first bytes
 - ESP32 → Daemon: 64-byte input report, response string in first bytes
@@ -277,6 +287,11 @@ Device settings. Written from hardcoded defaults on first boot.
 
 Factory reset rewrites both files from hardcoded defaults.
 
+Both files are written atomically — serialised to `<name>.tmp`, then renamed over
+the destination — so an interrupted write cannot leave a truncated file behind.
+A stray `.tmp` file after a power loss is harmless and is overwritten by the next
+save.
+
 ---
 
 ## Daemon — Cross-Platform Design
@@ -321,6 +336,72 @@ cmake -B daemon/build -S daemon
 cmake --build daemon/build
 ```
 
+#### Linux install
+The daemon runs as a dedicated unprivileged user. The udev rule is what makes
+that possible — without it `/dev/hidraw*` is root-only and the daemon cannot
+open the device.
+
+```
+# One-time: create the service user and grant it access to the device
+sudo groupadd --system esp32ir
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin -g esp32ir esp32ir
+sudo cp daemon/99-esp32-ir-remote.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Install the binary and unit file
+sudo install -m 755 daemon/build/esp32-ir-daemon /usr/local/bin/
+sudo cp daemon/esp32-ir-remote.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now esp32-ir-remote
+```
+
+Verify with the device plugged in — the ESP32's node should be group `esp32ir`:
+```
+ls -l /dev/hidraw*
+systemctl status esp32-ir-remote
+journalctl -u esp32-ir-remote -f
+```
+
+#### NixOS
+The project builds with plain CMake and PlatformIO like anywhere else — the
+flake only supplies the toolchain, it is not a second build system. Non-Nix
+users can ignore `flake.nix` entirely.
+
+```
+nix develop                                  # cmake, gcc, hidapi, sdbus-cpp_2, platformio
+cmake -B daemon/build -S daemon && cmake --build daemon/build
+cd firmware && pio run
+```
+
+Two NixOS-specific points, both of which will otherwise waste an afternoon:
+
+- **`sdbus-cpp_2`, not `sdbus-cpp`.** The unsuffixed attribute is still 1.x,
+  which the daemon cannot build against.
+- **`platformio`, not `platformio-core`.** PlatformIO downloads a prebuilt
+  `xtensa-esp32s3-elf` toolchain linked against `/lib64/ld-linux-x86-64.so.2`,
+  which does not exist on NixOS. The `platformio` attribute is FHS-wrapped
+  (bubblewrap) and handles this; the bare core package does not. The downloaded
+  toolchain binaries also cannot be run outside that wrapper, so `nm`, `gdb` and
+  friends must be invoked from inside `nix develop` too.
+
+The manual install steps above do not apply on NixOS — `useradd`/`groupadd` do
+not survive a `nixos-rebuild`, and `/usr/local/bin` is not how services are
+deployed. Use the module instead:
+
+```nix
+# flake.nix
+inputs.esp32-ir-remote.url = "github:Niall-xox/ESP32-IR-CEC-Alternative";
+
+# configuration.nix
+imports = [ inputs.esp32-ir-remote.nixosModules.default ];
+services.esp32-ir-remote.enable = true;
+```
+
+This declares the `esp32ir` user and group, installs the udev rule, and defines
+the service with the same hardening as the unit file. The package derivation
+calls the project's own `CMakeLists.txt` rather than reimplementing the build,
+so it cannot drift from what other distributions get.
+
 #### Windows build (requires Visual Studio Build Tools + vcpkg + hidapi)
 ```
 cmake -B daemon/build -S daemon -G "Visual Studio 17 2022" -A x64 \
@@ -359,6 +440,7 @@ firmware/
 daemon/
   CMakeLists.txt
   esp32-ir-remote.service
+  99-esp32-ir-remote.rules       (udev rule — lets the daemon run unprivileged)
   src/
     main.cpp
     IPowerMonitor.h
@@ -368,7 +450,20 @@ daemon/
     WindowsPowerMonitor.h / .cpp
   archive/
     SerialTransport.h / .cpp     (Phase 1 — not compiled, retained for reuse on non-HID devices)
+
+flake.nix                        (Nix dev shell, daemon package, NixOS module — optional, ignored elsewhere)
+
+3D modeling/
+  ESP32-Remote-Housing.FCStd     (FreeCAD source — the editable master for the housing)
+  *.STEP / *.step                (component models: board, IR transmitter, OLED, button)
+                                 STL exports are not tracked — re-export from the FCStd
+
+DEPRECATED Component test/       (pre-Phase 1 bring-up: IR LED, OLED and upload toolchain)
+HID test/                        (pre-Phase 2 spike: firmware + PC halves of a HID echo test)
 ```
+
+Both test directories predate the code they proved out and are kept for
+reference only — neither is built or flashed as part of the project.
 
 ### Firmware file summaries
 
@@ -378,18 +473,19 @@ daemon/
 | `main.cpp` | Entry point. USB HID device setup, IR dispatch, button callbacks, WiFi/web server lifecycle. |
 | `Button.h/.cpp` | Non-blocking button input with press/hold detection and debouncing. Fires callbacks at 300ms/5s/8s/23s thresholds. |
 | `Display.h/.cpp` | OLED state management. Handles status, IR confirm, hold/reset bars, WiFi lock message with timer-based expiry. |
-| `Profiles.h/.cpp` | Manufacturer IR profile + settings storage on LittleFS. Loads/saves JSON, factory reset, profile cycle helper. |
+| `Profiles.h/.cpp` | Manufacturer IR profile + settings storage on LittleFS. Loads/saves JSON, factory reset, profile cycle helper. Writes are atomic (temp file + rename) and `getActive()` falls back to a built-in profile if storage is unavailable. |
 | `data/index.html` | Single-page web UI served in WiFi mode. Profile CRUD, settings, factory reset, save & exit. |
 
 ### Daemon file summaries
 
 | File | Purpose |
 |------|---------|
-| `CMakeLists.txt` | Build configuration. C++17, hidapi on all platforms, sdbus-c++ on Linux. |
-| `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. |
-| `ITransport.h` | Abstract interface: `send(cmd)`. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
+| `CMakeLists.txt` | Build configuration. C++17, hidapi on all platforms, sdbus-c++ on Linux. Defaults to a Release build. |
+| `esp32-ir-remote.service` | systemd unit file. Starts at boot after logind, restarts on failure. Runs unprivileged as the `esp32ir` user with sandboxing applied. |
+| `99-esp32-ir-remote.rules` | udev rule granting the `esp32ir` group access to the device's `/dev/hidraw` node. Required for the daemon to run without root. |
+| `ITransport.h` | Abstract interface: `send(cmd)` returning true only once the device has confirmed the command. Isolates transport so `main.cpp` is unaffected by Serial → HID swap. |
 | `IPowerMonitor.h` | Abstract interface: callbacks for sleep/wake/shutdown + `run()`. Isolates OS-specific event handling. |
-| `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Reopens device automatically if write fails (e.g. after wake or replug). Single-threaded — no background polling. Unchanged on both platforms. |
+| `HIDTransport.h/.cpp` | `ITransport` implementation. Finds ESP32 by VID/PID via hidapi, sends 64-byte reports, blocks until ACK received. Returns false if the device is missing, the write fails, the ACK times out, or the device replies ERR. Reopens device automatically if write fails (e.g. after wake or replug). Single-threaded — no background polling. Unchanged on both platforms. |
 | `archive/SerialTransport.h/.cpp` | `ITransport` implementation for USB CDC Serial (Phase 1). Not compiled, retained for reuse on non-HID-capable devices. |
 | `LinuxPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Linux. D-Bus via sdbus-c++, manages inhibitor lock, releases after ACK. |
 | `WindowsPowerMonitor.h/.cpp` | `IPowerMonitor` implementation for Windows. Win32 Service API, blocks in control handler until ACK received. |
@@ -432,17 +528,113 @@ daemon/
 - `adafruit/Adafruit SSD1306`
 - `adafruit/Adafruit GFX Library`
 - `crankyoldgit/IRremoteESP8266`
-- `bblanchon/ArduinoJson` — JSON read/write for LittleFS profiles and settings
+- `bblanchon/ArduinoJson` — JSON read/write for LittleFS profiles and settings.
+  The firmware uses the **v7** API (`JsonDocument`, `arr.add<JsonObject>()`),
+  which does not compile against v6.
 - ESP32 built-ins: `WiFi`, `WebServer`, `LittleFS`, `Preferences`
+
+All dependencies carry a major-version constraint in `platformio.ini` so a later
+build cannot silently pull in a breaking release. These are floors, not exact
+pins — after the first successful build, run `pio pkg list` and replace each
+range with the version it actually resolved to make the build reproducible.
 
 ### PC Daemon
 - **Build:** CMake
 - **All platforms:** `hidapi` — USB HID communication
-- **Linux:** `sdbus-c++` — D-Bus communication with systemd-logind
+- **Linux:** `sdbus-c++` **2.0 or newer** — D-Bus communication with systemd-logind
 - **Windows:** Win32 API only, no extra dependencies beyond hidapi
+
+The sdbus-c++ major version is a hard requirement: the v2 API is not
+source-compatible with v1, and `CMakeLists.txt` enforces the minimum so a v1
+system fails at configure time with a clear version message rather than a wall
+of template errors. v2 is recent enough that distributions frozen before
+mid-2024 — notably older LTS releases — may still package 1.x, which would need
+building the library from source.
+
+If broad compatibility with older distributions ever outweighs the current
+implementation's readability, the alternative is `sd-bus` from libsystemd: a C
+API present on every systemd system by definition, with no third-party
+dependency at all. That swap is contained to `LinuxPowerMonitor.h/.cpp` plus two
+lines of `CMakeLists.txt`, since `main.cpp` only ever touches the
+`IPowerMonitor` interface.
 
 ---
 
 ## Open Questions
 - Confirm working discrete IR codes for Samsung, Sony, TCL, Hisense
 - Assign registered VID/PID before any public or commercial release
+
+---
+
+## Bug Fixes
+
+Reviewed after Phase 3. The architecture held up — no redesign was needed — but
+robustness gaps were found at the edges: corrupt input, a missing device, unusual
+OS events. The worst were not crashes but **failures that reported themselves as
+successes**, which send debugging in entirely the wrong direction.
+
+### Fixed
+
+| # | Issue | Cause → fix | Files |
+|---|---|---|---|
+| 1 | Daemon logged ACK for commands that never happened | `ITransport::send()` returned `void`, so an unplugged ESP32, a failed write and an expired 2s ACK timeout all logged as success. `send()` now returns `bool`; failures log `FAILED — no ACK, TV state not changed`. A false return still never blocks sleep or shutdown. | `ITransport.h`, `HIDTransport.*`, daemon `main.cpp`, `archive/SerialTransport.*` |
+| 2 | Corrupt profile storage caused a reboot loop | Saves opened the destination with `"w"`, truncating it immediately, and every profile cycle saves — so a power loss mid-write corrupted the file. `getActive()` then indexed an empty vector and crashed on the next button press or IR command. Now `writeJsonAtomic()` writes to `.tmp` and renames; `getActive()` falls back to a built-in profile and range-checks the index; `begin()` restores defaults if a load yields nothing, and `setup()` checks its return value. | `Profiles.*`, firmware `main.cpp` |
+| 3 | Missing JSON fields passed `nullptr` to `strtoul` (undefined behaviour) | `as<const char*>()` yields `nullptr` for an absent or non-string key. Parsing is now centralised in `Profiles::fromJson()`, which null-checks and defaults to `0x0`. This also removed a duplicated copy of the parse logic, so LittleFS loads and web POSTs can no longer drift apart. | `Profiles.*`, firmware `main.cpp` |
+| 4 | Successful factory reset reported as failed | The reset also exits WiFi mode, so the page's follow-up `load()` could never complete and showed a red error with the AP already gone. Reload removed; the page now reports success and warns that WiFi is shutting down. | `index.html` |
+| 5 | Saving could select the wrong profile | Profiles and settings were POSTed concurrently, so `/api/settings` could range-check `active_profile` against the pre-delete list. Now sequential, profiles first. `save()` returns a bool and `Save & Exit` no longer exits on a failed save, which previously discarded the changes. | `index.html` |
+| 6 | HID receive flag not `volatile` | `received_` is written on the TinyUSB task and read by `loop()`; the compiler was free to cache it and never observe the change. `rxBuf_` itself is safe — the protocol is strictly request/response. | firmware `main.cpp` |
+| 7 | Progress bars redrew the full screen every loop | `onHold` fires every iteration, pushing a whole 128×32 I²C frame for a bar with only 5 or 15 states. `Display` now caches bar kind and fill level and skips unchanged redraws — roughly 20 per 23s hold instead of thousands. | `Display.*` |
+| 8 | Daemon ran as root | Only `/dev/hidraw*` access needed privilege. `99-esp32-ir-remote.rules` grants the `esp32ir` group access to that one device; the unit now runs unprivileged with sandboxing. Relax `ProtectSystem` first if D-Bus ever becomes unreachable. | `.service`, `.rules` |
+| 9 | Build reproducibility | Nothing was version-pinned (the v7 ArduinoJson API will not compile against v6) — all dependencies now carry major-version constraints. CMake linked the bare `${HIDAPI_LIBRARIES}` name list, dropping the library search path; now uses `IMPORTED_TARGET` + `PkgConfig::HIDAPI`. Added a Release default. Replaced deprecated `containsKey()` with `is<T>()`. | `platformio.ini`, `CMakeLists.txt`, firmware `main.cpp` |
+| 10 | Dead code | `Button::holdFired_`, `Button::configFired_` and the web UI's `settingsChanged` were write-only, and a comment describing `configFired_` was wrong. All removed. | `Button.*`, `index.html` |
+| 12 | Daemon log output never reached the journal | `std::cout` is fully buffered whenever stdout is not a terminal — which is exactly the case under systemd, where it is a pipe to the journal. Log lines sat in a 4KB buffer (months of normal operation at this volume), and anything written just before systemd's SIGTERM was lost outright, including the shutdown `OFF` confirmation. Worse, `std::cerr` is unbuffered *and* tied to `std::cout`, so failures always appeared while successes silently vanished — the exact inverse of the problem fix 1 solved. `std::cout << std::unitbuf` in `main()`. Found by running the daemon: it produced no output at all until forced through `stdbuf -oL`. | daemon `main.cpp` |
+| 11 | `ARDUINO_USB_MODE` defined twice | The `lolin_s3_mini` board definition hardcodes `=1` (CDC serial); `build_flags` appended `=0` without removing it, so correctness rested on `-D` ordering and the build emitted ~170 redefinition warnings that would hide any real one. Now removed via `build_unflags` first. Found during the first compile; the binary is byte-identical, so the previous ordering was already resolving correctly — but had it ever flipped, the device would have enumerated as CDC serial and the daemon would never have found it. | `platformio.ini` |
+
+### Known and deferred
+
+| Issue | Notes |
+|---|---|
+| Samsung / Sony / TCL / Hisense codes are `0x00000000` | Needs real discrete codes per manufacturer. These profiles are `visible: true`, so they can be selected, transmit a meaningless frame **and still return ACK** — everything the device reports says success. Make the firmware treat `0x0` as unconfigured (reply `ERR`, show "Not configured") when the codes are added. |
+| WiFi AP password hardcoded (`irremote123`) | Bounded — config mode is user-initiated and transient. Better: a per-device password derived from the chip ID, shown on the OLED beside the IP. |
+| `onNotFound` serves any file on LittleFS | `/profiles.json` and `/settings.json` are readable by anyone on the AP. Harmless today; a real leak the moment anything sensitive is stored. Fix with a whitelist or a `/www` prefix. |
+| Windows: automatic wake leaves the TV off | Only `PBT_APMRESUMESUSPEND` is handled. Windows sends `PBT_APMRESUMEAUTOMATIC` on *every* resume and adds `RESUMESUSPEND` only for user-initiated ones, so Wake-on-LAN and scheduled wakes are missed. Needs both events plus a dedup flag. |
+| Windows: stop event never signalled | `serviceMain` waits on an event nothing sets, so the process lingers holding the HID device open — an immediate service restart then fails to find the ESP32. |
+| Placeholder VID/PID | See Open Questions. These are common hobbyist defaults, so another device could collide — `hid_open` takes the first match. |
+
+Both Windows items need a Windows machine to verify. Fix 1 changes `ITransport`,
+which the Windows build links against — no Windows code changed, but the daemon
+still needs rebuilding there.
+
+### Verification status
+
+**Compiled — both halves, zero warnings.**
+
+- Daemon: builds against sdbus-c++ 2.2.1 and hidapi 0.15.0, links
+  `libsdbus-c++.so.2`. CMake 4.3.4 accepts the `3.16` minimum.
+- Firmware: builds clean at 902,657 bytes flash (68.9%) and 58,344 bytes RAM
+  (17.8%).
+
+**Flashed and verified on hardware.** Firmware and filesystem both written and
+hash-verified; the device enumerates as `1234:5678 ESP32 IR Remote`.
+
+| Fix | How it was verified |
+|---|---|
+| 1 (failure path) | With no device attached, the daemon logs `ON FAILED — no ACK, TV state not changed` where it previously claimed success. |
+| 1 (success path) | Against the real device: `[cmd] ON sent and ACK received (startup)` — the ESP32 received the command, fired the IR and replied. |
+| 2 | Button press shows `Profile: LG` — profiles loaded from a freshly formatted LittleFS instead of indexing an empty vector. |
+| 7 | Hold bars animate smoothly with the redraw cache in place. |
+| 8 | `[inhibitor] Lock acquired` succeeded as an unprivileged user against real logind — the part most likely to fail quietly. |
+| 11 | Found by compiling; rebuilt binary is byte-identical. |
+| 12 | Found by running; output now appears without `stdbuf`. |
+
+**Still unverified:**
+
+1. Sleep / wake / shutdown firing IR with the device attached (needs a real
+   suspend cycle).
+2. Fix 2's recovery path — corrupt `/profiles.json` deliberately and confirm the
+   device restores defaults rather than rebooting.
+3. Fix 4 / 5 — factory reset and profile deletion through the web UI.
+4. The daemon running as an installed service rather than by hand, which needs
+   the udev rule in place.
+5. `flake.nix` has never been evaluated — the package and NixOS module outputs
+   are entirely untested.
