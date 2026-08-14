@@ -625,16 +625,29 @@ hash-verified; the device enumerates as `1234:5678 ESP32 IR Remote`.
 | 7 | Hold bars animate smoothly with the redraw cache in place. |
 | 8 | `[inhibitor] Lock acquired` succeeded as an unprivileged user against real logind — the part most likely to fail quietly. |
 | 11 | Found by compiling; rebuilt binary is byte-identical. |
-| 12 | Found by running; output now appears without `stdbuf`. |
+| 12 | Found by running; output now appears without `stdbuf`, and reaches the journal under systemd. |
+
+**Deployed and verified on NixOS via the flake module.** The daemon runs as an
+enabled system service under the unprivileged `esp32ir` user, the udev rule
+grants it `/dev/hidraw*` (`root:esp32ir`, mode `0660`) automatically on hotplug,
+and the journal shows the full startup path:
+
+```
+[transport] HID device opened (VID=1234 PID=5678)
+[inhibitor] Lock acquired
+[monitor] Connected to systemd-logind
+[cmd] ON sent and ACK received (startup)
+```
+
+Note on udev: rules are evaluated when a device is **added**, so installing the
+rule while the device is already plugged in does nothing until it is replugged
+(or `udevadm trigger -s hidraw` is run). This is expected behaviour, not a
+broken rule.
 
 **Still unverified:**
 
-1. Sleep / wake / shutdown firing IR with the device attached (needs a real
-   suspend cycle).
+1. Sleep / wake / shutdown firing IR (needs a real suspend cycle and a reboot —
+   boot and shutdown behaviour only exists once systemd owns the process).
 2. Fix 2's recovery path — corrupt `/profiles.json` deliberately and confirm the
    device restores defaults rather than rebooting.
 3. Fix 4 / 5 — factory reset and profile deletion through the web UI.
-4. The daemon running as an installed service rather than by hand, which needs
-   the udev rule in place.
-5. `flake.nix` has never been evaluated — the package and NixOS module outputs
-   are entirely untested.
