@@ -1,0 +1,103 @@
+name: Packages
+
+# Builds the .deb and .rpm. Both are produced in containers rather than on the
+# runner directly, for two reasons:
+#
+#   1. CPack shells out to dpkg-deb and rpmbuild, so each package can only be
+#      built on a host that has that tool.
+#   2. sdbus-c++ 2.x is the hard constraint. The base image has to be one that
+#      actually ships it — see the comment on each job.
+#
+# Arch is absent on purpose: packaging/PKGBUILD builds on the user's own machine,
+# so there is nothing for CI to produce.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    # debian:trixie carries sdbus-c++ 2.1.0. Note this cannot be built on the
+    # bare ubuntu-latest runner: Ubuntu 24.04 LTS still ships 1.4.0, and the
+    # find_package(sdbus-c++ 2.0 REQUIRED) guard rejects it at configure time.
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config file \
+            libsdbus-c++-dev libhidapi-dev
+
+      - name: Build
+        run: |
+          cmake -B daemon/build -S daemon -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build daemon/build
+
+      - name: Package
+        run: cpack -G DEB --config daemon/build/CPackConfig.cmake -B daemon/build
+
+      - name: Inspect the package
+        # Cheap sanity check that beats discovering a bad layout after release:
+        # prints the declared dependencies and the full file list.
+        run: |
+          dpkg-deb --info    daemon/build/*.deb
+          dpkg-deb --contents daemon/build/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: daemon/build/*.deb
+
+  rpm:
+    runs-on: ubuntu-latest
+    # Rawhide, not a stable Fedora — Fedora 42 ships sdbus-c++ 1.5.0, which the
+    # daemon cannot build against. 2.x landed for F44. Until that is a stable
+    # release this job tracks rawhide and the resulting .rpm is installable only
+    # on F44+, so treat it as a preview rather than a supported artifact.
+    container: fedora:rawhide
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            cmake gcc-c++ pkgconf-pkg-config rpm-build \
+            sdbus-cpp-devel hidapi-devel
+
+      - name: Build
+        run: |
+          cmake -B daemon/build -S daemon -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build daemon/build
+
+      - name: Package
+        run: cpack -G RPM --config daemon/build/CPackConfig.cmake -B daemon/build
+
+      - name: Inspect the package
+        run: |
+          rpm -qip daemon/build/*.rpm
+          rpm -qlp daemon/build/*.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: daemon/build/*.rpm
+
+  release:
+    needs: [deb, rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.{deb,rpm}
