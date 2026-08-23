@@ -4,7 +4,7 @@
 // over USB HID. Uses a systemd inhibitor lock to delay sleep and shutdown
 // until the ESP32 confirms the IR signal has been transmitted via ACK.
 //
-// Startup  → send ON  (TV on when PC boots)
+// Boot     → send ON  (TV on when PC boots; skipped on a mere service restart)
 // Sleep    → send OFF, wait for ACK, release inhibitor lock
 // Wake     → send ON  (no lock needed — system is already running)
 // Shutdown → send OFF, wait for ACK, release inhibitor lock
@@ -19,6 +19,7 @@
 #include "WindowsPowerMonitor.h"
 #endif
 
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -28,6 +29,32 @@
 // commercial release.
 static constexpr uint16_t DEVICE_VID = 0x1234;
 static constexpr uint16_t DEVICE_PID = 0x5678;
+
+// How recently the machine must have booted for a service start to count as a
+// boot. Generous on purpose: a slow machine that misses the window merely fails
+// to turn the TV on, which the user can undo with their remote, whereas a tight
+// window would make that the common case.
+static constexpr double BOOT_WINDOW_SECONDS = 180.0;
+
+// True if this process is starting because the machine booted, rather than
+// because the service was restarted under a machine that was already up.
+//
+// The startup ON exists to mirror a boot. It also fired on every `systemctl
+// restart`, package upgrade and Restart=on-failure, so a daemon that crashed at
+// 3am turned the TV on — and a user who had deliberately switched the TV off
+// while leaving the PC running had it switched back on under them.
+static bool systemJustBooted() {
+#ifdef __linux__
+    std::ifstream uptimeFile("/proc/uptime");
+    double uptimeSeconds = 0.0;
+    if (uptimeFile >> uptimeSeconds) {
+        return uptimeSeconds < BOOT_WINDOW_SECONDS;
+    }
+    // /proc unreadable — fall through to the old unconditional behaviour rather
+    // than skipping the ON a real boot was owed.
+#endif
+    return true;
+}
 
 int main() {
     // Flush stdout on every write.
@@ -99,8 +126,14 @@ int main() {
         report("OFF", "shutdown", transport->send("OFF"));
     });
 
-    // Send ON at startup — the service starting means the PC just booted.
-    report("ON", "startup", transport->send("ON"));
+    // Send ON at startup, but only when the service start actually corresponds
+    // to the machine booting — see systemJustBooted().
+    if (systemJustBooted()) {
+        report("ON", "startup", transport->send("ON"));
+    } else {
+        std::cout << "[cmd] ON skipped — service restarted on an already-running "
+                     "system, not a boot\n";
+    }
 
     // Blocks here until the process is killed by systemd on shutdown.
     std::cout << "[sys] Daemon running\n";

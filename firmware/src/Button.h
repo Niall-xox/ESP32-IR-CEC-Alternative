@@ -13,9 +13,14 @@
 //
 // All timing is non-blocking. Call update() on every loop() iteration.
 // Register callbacks for each event — they fire once at the right moment.
+//
+// The thresholds themselves live in HoldTimings.h, shared with Display so the
+// progress bars cannot drift out of step with the callbacks they represent.
 
 #include <Arduino.h>
 #include <functional>
+
+#include "HoldTimings.h"
 
 class Button {
 public:
@@ -37,12 +42,6 @@ public:
     // Call on every loop() iteration — drives all timing and fires callbacks
     void update();
 
-    // Returns true if the button is currently held past the press threshold
-    bool isHeld() const;
-
-    // Returns how long the button has been held in ms (0 if not held)
-    uint32_t heldMs() const;
-
 private:
     uint8_t  pin_;
     bool     pullup_;
@@ -51,10 +50,4 @@ private:
     bool     resetFired_    = false;  // True once factory reset callback has fired
     uint32_t pressTime_     = 0;      // millis() when button went down
     uint32_t lastDebounce_  = 0;      // millis() of last state change (for debounce)
-
-    static constexpr uint32_t DEBOUNCE_MS      =   20;
-    static constexpr uint32_t PRESS_MAX_MS     =  300;   // Max ms for a press (vs hold)
-    static constexpr uint32_t CONFIG_MS        = 5000;   // Hold threshold for config mode
-    static constexpr uint32_t RESET_START_MS   = 8000;   // Hold threshold to begin reset bar
-    static constexpr uint32_t RESET_TRIGGER_MS = 23000;  // Hold threshold to auto-trigger reset
 };

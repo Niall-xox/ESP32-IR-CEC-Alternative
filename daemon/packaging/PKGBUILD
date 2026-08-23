@@ -1,0 +1,39 @@
+# Maintainer: Niall <niall.fatah2003@gmail.com>
+#
+# Arch package. Unlike the .deb and .rpm this is not produced by CPack — Arch
+# builds from source on the user's own machine, which is why maintaining it
+# needs no Arch machine and no CI.
+#
+#   makepkg -si
+#
+# Arch carries sdbus-cpp 2.x in [extra], so there is no version problem here of
+# the kind Ubuntu 24.04 and Fedora 42 have.
+
+pkgname=esp32-ir-remote
+# Must match daemon/VERSION and the v$pkgver git tag this builds from. makepkg
+# needs a literal here — it cannot read the version out of a source it has not
+# fetched yet — so this is the one place the number is repeated by hand.
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Mirrors PC power state to a TV over IR, as a CEC alternative"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Niall-xox/ESP32-IR-CEC-Alternative"
+license=('MIT')
+depends=('sdbus-cpp>=2.0' 'hidapi' 'systemd-libs')
+makedepends=('cmake' 'pkgconf' 'git')
+install="${pkgname}.install"
+source=("git+${url}.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+
+build() {
+    # The daemon is one subdirectory of a repository that also holds the ESP32
+    # firmware and the CAD sources; only daemon/ has a CMakeLists.
+    cmake -B build -S "ESP32-IR-CEC-Alternative/daemon" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}

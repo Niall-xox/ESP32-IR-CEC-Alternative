@@ -8,8 +8,13 @@
 #include <stdexcept>
 #include <thread>
 
-// How long to keep retrying if the port isn't available after wake.
-static constexpr auto REOPEN_TIMEOUT = std::chrono::seconds(10);
+// Total budget for one send(), matching HIDTransport's.
+//
+// send() runs inside a sleep or shutdown handler while a logind delay inhibitor
+// is held, and logind stops waiting after InhibitDelayMaxSec (5s by default).
+// The old 10s reopen loop was twice that on its own: the system would suspend
+// out from under the retry, so the wait bought nothing and cost the guarantee.
+static constexpr auto SEND_BUDGET = std::chrono::milliseconds(4000);
 
 // How long to wait between reopen attempts.
 static constexpr auto REOPEN_POLL_INTERVAL = std::chrono::milliseconds(100);
@@ -62,23 +67,35 @@ void SerialTransport::configurePort() {
 }
 
 bool SerialTransport::send(const std::string& cmd) {
-    std::string msg = cmd + "\n";
-
-    auto deadline = std::chrono::steady_clock::now() + REOPEN_TIMEOUT;
+    const std::string msg = cmd + "\n";
+    const auto deadline = std::chrono::steady_clock::now() + SEND_BUDGET;
 
     while (true) {
         if (fd_ >= 0) {
-            ssize_t written = write(fd_, msg.c_str(), msg.size());
-            if (written > 0) return true;  // bytes written — no ACK exists in Phase 1
+            const ssize_t written = write(fd_, msg.c_str(), msg.size());
 
-            // Write failed — port went stale (e.g. USB disconnected during sleep)
-            std::cerr << "[transport] Write failed, port stale — reopening\n";
+            // A short write leaves a partial command in the device's input
+            // buffer, which will not parse as ON or OFF. Treat it as a failure
+            // rather than reporting a command that was never fully delivered.
+            if (written == (ssize_t)msg.size()) return true;
+
+            if (written > 0) {
+                std::cerr << "[transport] Short write (" << written << " of "
+                          << msg.size() << " bytes) — reopening\n";
+            } else {
+                std::cerr << "[transport] Write failed, port stale — reopening\n";
+            }
             close(fd_);
             fd_ = -1;
         }
 
-        if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error("Timed out waiting for serial port: " + port_);
+        // Out of budget. Return false rather than throwing: ITransport requires
+        // a failure here not to stop the caller, which still has to let the
+        // system sleep or shut down.
+        if (std::chrono::steady_clock::now() + REOPEN_POLL_INTERVAL >= deadline) {
+            std::cerr << "[transport] Serial port unavailable within budget — "
+                         "skipping command: " << cmd << " (" << port_ << ")\n";
+            return false;
         }
 
         // Poll until the port reappears (USB re-enumeration after wake)

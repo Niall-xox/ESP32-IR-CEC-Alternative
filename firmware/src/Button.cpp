@@ -18,7 +18,7 @@ void Button::update() {
     }
 
     // Ignore state changes within the debounce window
-    if ((millis() - lastDebounce_) < DEBOUNCE_MS) return;
+    if ((millis() - lastDebounce_) < HoldTimings::DEBOUNCE_MS) return;
 
     // --- Falling edge: button just went down ---
     if (raw && !pressed_) {
@@ -33,14 +33,14 @@ void Button::update() {
         pressed_        = false;
         uint32_t held   = millis() - pressTime_;
 
-        if (held < PRESS_MAX_MS) {
+        if (held < HoldTimings::PRESS_MAX_MS) {
             // Released quickly — treat as a press
             if (onPress) onPress();
-        } else if (held < CONFIG_MS) {
+        } else if (held < HoldTimings::CONFIG_MS) {
             // Released during hold bar phase (300ms–5s) — cancel
             if (onHoldCancelled) onHoldCancelled();
         } else if (!resetFired_) {
-            if (held < RESET_START_MS) {
+            if (held < HoldTimings::RESET_START_MS) {
                 // Released in the 5s–8s window ("Release to Enter/Exit" screen) —
                 // trigger config mode toggle
                 if (onConfigThreshold) onConfigThreshold();
@@ -59,7 +59,7 @@ void Button::update() {
         uint32_t held = millis() - pressTime_;
 
         // Once past the press threshold, begin the hold phase
-        if (held >= PRESS_MAX_MS) {
+        if (held >= HoldTimings::PRESS_MAX_MS) {
             // Fire onHold every update() so the display can draw the progress bar
             if (onHold) onHold(held);
 
@@ -69,19 +69,10 @@ void Button::update() {
             // out what to do from the elapsed hold time alone.
 
             // Factory reset: auto-triggers at 23s, no release needed
-            if (held >= RESET_TRIGGER_MS && !resetFired_) {
+            if (held >= HoldTimings::RESET_END_MS && !resetFired_) {
                 resetFired_ = true;
                 if (onFactoryReset) onFactoryReset();
             }
         }
     }
-}
-
-bool Button::isHeld() const {
-    return pressed_ && (millis() - pressTime_) >= PRESS_MAX_MS;
-}
-
-uint32_t Button::heldMs() const {
-    if (!pressed_) return 0;
-    return millis() - pressTime_;
 }

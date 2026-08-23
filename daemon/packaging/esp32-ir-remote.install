@@ -1,0 +1,45 @@
+# pacman hooks for esp32-ir-remote.
+#
+# Deliberately does *not* run `systemctl enable --now`, unlike the .deb and .rpm
+# postinst. Arch packaging policy leaves enabling services to the user, so this
+# only creates the account the unit needs and says what to do next.
+
+post_install() {
+    if ! getent group esp32ir >/dev/null; then
+        groupadd --system esp32ir
+    fi
+    if ! getent passwd esp32ir >/dev/null; then
+        useradd --system --no-create-home --shell /usr/bin/nologin \
+                --gid esp32ir --comment "ESP32 IR Remote daemon" esp32ir
+    fi
+
+    cat <<'EOF'
+
+esp32-ir-remote is installed but not enabled. To start it:
+
+    sudo systemctl enable --now esp32-ir-remote
+
+The udev rule only applies on a device add event, so replug the ESP32 (or run
+`sudo udevadm trigger --subsystem-match=hidraw --action=add`) if it is already
+connected. Check with `ls -l /dev/hidraw*` — the node should be group esp32ir.
+
+EOF
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    systemctl disable --now esp32-ir-remote.service 2>/dev/null || true
+}
+
+post_remove() {
+    cat <<'EOF'
+
+The esp32ir user and group were left in place. Remove them with:
+
+    sudo userdel esp32ir && sudo groupdel esp32ir
+
+EOF
+}

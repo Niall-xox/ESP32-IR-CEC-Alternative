@@ -45,11 +45,6 @@ static Settings              settings_;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// Format a uint32_t code as a "0x" hex string into a caller-supplied buffer.
-static void codeToHex(uint32_t code, char* buf, size_t len) {
-    snprintf(buf, len, "0x%08X", code);
-}
-
 // Serialise a document to `path` without ever leaving a half-written file
 // behind.
 //
@@ -68,11 +63,20 @@ static bool writeJsonAtomic(const char* path, const JsonDocument& doc) {
         return false;
     }
 
-    const size_t written = serializeJson(doc, f);
+    // Compare against the expected length, not against zero.
+    //
+    // serializeJson() reports what the underlying Print actually accepted, so a
+    // full or failing flash yields a *partial* document with a non-zero count.
+    // Only rejecting zero let that partial file be renamed over the known-good
+    // one, which is precisely the corruption this function exists to prevent —
+    // the temp file made the replacement atomic without making it correct.
+    const size_t expected = measureJson(doc);
+    const size_t written  = serializeJson(doc, f);
     f.close();
 
-    if (written == 0) {
-        Serial.printf("[profiles] Wrote 0 bytes to %s — discarding\n", tmpPath.c_str());
+    if (written != expected) {
+        Serial.printf("[profiles] Short write to %s (%u of %u bytes) — discarding\n",
+                      tmpPath.c_str(), (unsigned)written, (unsigned)expected);
         LittleFS.remove(tmpPath.c_str());
         return false;
     }
@@ -92,27 +96,37 @@ static bool writeJsonAtomic(const char* path, const JsonDocument& doc) {
     return true;
 }
 
-// Serialise the hardcoded default profiles into a document.
-static void buildDefaultProfilesDoc(JsonDocument& doc) {
-    JsonArray arr = doc.to<JsonArray>();
+// Convert one hardcoded default into the runtime Profile type.
+static Profile profileFromDefault(const DefaultProfile& d) {
+    return Profile{
+        String(d.name),
+        Profiles::protocolFromString(String(d.protocol)),
+        d.onCode,
+        d.offCode,
+        d.visible
+    };
+}
 
-    for (const auto& d : DEFAULT_PROFILES) {
-        JsonObject obj = arr.add<JsonObject>();
-        char onBuf[11], offBuf[11];
-        codeToHex(d.onCode,  onBuf,  sizeof(onBuf));
-        codeToHex(d.offCode, offBuf, sizeof(offBuf));
-        obj["name"]     = d.name;
-        obj["protocol"] = d.protocol;
-        obj["on"]       = onBuf;
-        obj["off"]      = offBuf;
-        obj["visible"]  = d.visible;
-    }
+// The hardcoded defaults as a runtime list — the factory reset source of truth.
+static std::vector<Profile> defaultProfiles() {
+    std::vector<Profile> v;
+    v.reserve(sizeof(DEFAULT_PROFILES) / sizeof(DEFAULT_PROFILES[0]));
+    for (const auto& d : DEFAULT_PROFILES) v.push_back(profileFromDefault(d));
+    return v;
+}
+
+// Serialise a profile list into a document. The single place profiles become
+// JSON — used by the defaults, by saveProfiles() and by the web UI's GET
+// handler, all of which previously built the same object by hand.
+static void profilesToDoc(const std::vector<Profile>& list, JsonDocument& doc) {
+    JsonArray arr = doc.to<JsonArray>();
+    for (const auto& p : list) Profiles::toJson(p, arr.add<JsonObject>());
 }
 
 // Write the hardcoded default profiles to /profiles.json.
 static void writeDefaultProfiles() {
     JsonDocument doc;
-    buildDefaultProfilesDoc(doc);
+    profilesToDoc(defaultProfiles(), doc);
     writeJsonAtomic("/profiles.json", doc);
 }
 
@@ -141,6 +155,15 @@ static void loadProfiles() {
     }
 
     for (JsonObjectConst obj : doc.as<JsonArrayConst>()) {
+        // Cap the list rather than growing the vector to whatever the file
+        // claims. profiles.json is normally written by this firmware, but it is
+        // also reachable over the config-mode AP, and an unbounded list is a
+        // heap exhaustion away from a boot loop on a 320KB device.
+        if (profiles_.size() >= Profiles::MAX_PROFILES) {
+            Serial.printf("[profiles] Ignoring profiles beyond the %u cap\n",
+                          (unsigned)Profiles::MAX_PROFILES);
+            break;
+        }
         profiles_.push_back(Profiles::fromJson(obj));
     }
 
@@ -223,13 +246,7 @@ const Profile& getActive() {
     // loaded — a failed LittleFS mount leaves the list empty and indexing it
     // would read out of bounds. The fallback keeps the device responsive
     // (display, button, HID all still work) on the one confirmed profile.
-    static const Profile FALLBACK = {
-        String(DEFAULT_PROFILES[0].name),
-        protocolFromString(String(DEFAULT_PROFILES[0].protocol)),
-        DEFAULT_PROFILES[0].onCode,
-        DEFAULT_PROFILES[0].offCode,
-        true
-    };
+    static const Profile FALLBACK = profileFromDefault(DEFAULT_PROFILES[0]);
 
     if (profiles_.empty()) return FALLBACK;
 
@@ -262,26 +279,15 @@ int nextVisibleIndex() {
 
 void replaceAll(std::vector<Profile> newProfiles) {
     profiles_ = std::move(newProfiles);
-    if (settings_.activeProfile >= (int)profiles_.size()) {
+    if (settings_.activeProfile < 0 ||
+        settings_.activeProfile >= (int)profiles_.size()) {
         settings_.activeProfile = 0;
     }
 }
 
 void saveProfiles() {
     JsonDocument doc;
-    JsonArray    arr = doc.to<JsonArray>();
-
-    for (const auto& p : profiles_) {
-        JsonObject obj = arr.add<JsonObject>();
-        char onBuf[11], offBuf[11];
-        codeToHex(p.onCode,  onBuf,  sizeof(onBuf));
-        codeToHex(p.offCode, offBuf, sizeof(offBuf));
-        obj["name"]     = p.name;
-        obj["protocol"] = protocolToString(p.protocol);
-        obj["on"]       = onBuf;
-        obj["off"]      = offBuf;
-        obj["visible"]  = p.visible;
-    }
+    profilesToDoc(profiles_, doc);
 
     if (writeJsonAtomic("/profiles.json", doc)) {
         Serial.println("[profiles] Saved profiles.json");
@@ -305,6 +311,22 @@ void factoryReset() {
     loadProfiles();
     loadSettings();
     Serial.println("[profiles] Factory reset complete");
+}
+
+void toJson(const Profile& p, JsonObject obj) {
+    char onBuf[11], offBuf[11];
+    snprintf(onBuf,  sizeof(onBuf),  "0x%08X", p.onCode);
+    snprintf(offBuf, sizeof(offBuf), "0x%08X", p.offCode);
+
+    obj["name"]     = p.name;
+    obj["protocol"] = protocolToString(p.protocol);
+    obj["on"]       = onBuf;
+    obj["off"]      = offBuf;
+    obj["visible"]  = p.visible;
+}
+
+bool isConfigured(const Profile& p, bool on) {
+    return (on ? p.onCode : p.offCode) != 0;
 }
 
 Profile fromJson(JsonObjectConst obj) {

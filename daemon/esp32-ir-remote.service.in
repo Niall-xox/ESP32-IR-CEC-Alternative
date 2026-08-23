@@ -1,12 +1,21 @@
+# Template — CMake substitutes @CMAKE_INSTALL_FULL_BINDIR@ at configure time and
+# writes the result into the build directory. Edit this file, never the
+# generated one. Hardcoding the path here would be wrong for at least one of the
+# two prefixes in play: /usr/local for a hand `cmake --install`, /usr for a
+# distribution package.
+
 [Unit]
 Description=ESP32 IR Remote Daemon
-# Must start after logind is running — we connect to it over D-Bus at startup
-After=systemd-logind.service
+# Must start after logind is running — we connect to it over D-Bus at startup.
+# dbus.socket is ordered explicitly too: without it the daemon can win the race
+# against the system bus at boot, fail to connect, exit 1, and only recover on
+# the next Restart= attempt — turning the TV on several seconds late.
+After=dbus.socket systemd-logind.service
 Requires=systemd-logind.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/esp32-ir-daemon
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/esp32-ir-daemon
 # Restart on unexpected exit (e.g. serial port disconnected).
 # Does not restart on clean exit (e.g. systemd stopping the service for shutdown).
 Restart=on-failure
@@ -15,7 +24,8 @@ RestartSec=5
 # Run unprivileged. The daemon only needs to open the ESP32's /dev/hidraw node
 # and talk to logind on the system bus — neither requires root once
 # 99-esp32-ir-remote.rules has granted the esp32ir group access to the device.
-# See that file for the user/group creation commands.
+# The account is created by packaging/postinst when installed from a package,
+# or by hand per the install steps in the brief.
 User=esp32ir
 Group=esp32ir
 

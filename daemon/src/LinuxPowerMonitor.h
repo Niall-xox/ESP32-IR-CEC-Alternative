@@ -14,9 +14,12 @@
 //
 // Inhibitor lock lifecycle:
 //   1. Lock is acquired at construction and held continuously.
-//   2. When a sleep/shutdown signal fires, the callback runs, we wait 500ms,
-//      then release the lock — systemd then proceeds.
-//   3. On wake, the lock is re-acquired ready for the next sleep.
+//   2. When a sleep/shutdown signal fires, the callback runs to completion —
+//      which for HIDTransport means the ESP32 has ACKed — and the lock is then
+//      released. systemd proceeds. There is no fixed delay anywhere.
+//   3. The lock is re-acquired whenever the system stays up: after a resume,
+//      and after a cancelled shutdown. Both must re-take it, or the next event
+//      goes unblocked and the IR command races the machine powering down.
 class LinuxPowerMonitor : public IPowerMonitor {
 public:
     // Connects to the system D-Bus, registers signal handlers, and acquires
@@ -32,8 +35,14 @@ public:
     void run() override;
 
 private:
-    // Calls logind's Inhibit() method and stores the returned lock fd.
-    void takeInhibitorLock();
+    // Calls logind's Inhibit() and stores the returned lock fd.
+    //
+    // Returns false instead of throwing. It is called from D-Bus signal
+    // handlers, and an exception escaping one of those unwinds into the sdbus
+    // event loop — which at best loses the lock silently and at worst takes the
+    // process down. The constructor treats a false return as fatal; the
+    // handlers log it and carry on without the delay guarantee.
+    bool takeInhibitorLock();
 
     // Releases the lock by destroying the fd — systemd then proceeds.
     void releaseInhibitorLock();

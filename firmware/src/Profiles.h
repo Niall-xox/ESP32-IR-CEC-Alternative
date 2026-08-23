@@ -51,6 +51,11 @@ struct Settings {
 // ---------------------------------------------------------------------------
 namespace Profiles {
 
+    // Upper bound on the profile list. profiles.json is normally written by
+    // this firmware, but it is also reachable over the config-mode AP, so the
+    // list is capped rather than sized by whatever the input claims.
+    static constexpr size_t MAX_PROFILES = 32;
+
     // Initialise LittleFS and load profiles and settings into memory.
     // Writes /profiles.json and /settings.json from hardcoded defaults
     // on first boot if the files do not already exist, and again if the
@@ -93,6 +98,17 @@ namespace Profiles {
     // rather than being parsed blindly — an absent "on"/"off" key yields 0x0,
     // an unknown protocol yields NEC.
     Profile fromJson(JsonObjectConst obj);
+
+    // Serialise a Profile into an existing JSON object. The single place
+    // profiles become JSON — shared by the on-disk format and the web API so
+    // the two cannot drift, as three hand-written copies previously could.
+    void toJson(const Profile& p, JsonObject obj);
+
+    // True if the profile carries a real code for the requested direction.
+    // 0x0 is the "not yet confirmed for this manufacturer" placeholder used by
+    // the defaults: transmitting it produces a meaningless frame, so callers
+    // must check this before claiming an IR command succeeded.
+    bool isConfigured(const Profile& p, bool on);
 
     // Protocol string conversion — used when reading/writing JSON
     IrProtocol protocolFromString(const String& s);

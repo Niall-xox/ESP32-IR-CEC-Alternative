@@ -67,9 +67,12 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     if (!ok_) return;
     timerActive_ = false;
 
-    // 5-block bar filling from 300ms to 5000ms
-    uint32_t elapsed = heldMs > 300 ? heldMs - 300 : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 5) / (CONFIG_MS - 300));
+    // 5-block bar filling across the window the config threshold spans
+    constexpr uint32_t BAR_START = HoldTimings::PRESS_MAX_MS;
+    constexpr uint32_t BAR_SPAN  = HoldTimings::CONFIG_MS - BAR_START;
+
+    uint32_t elapsed = heldMs > BAR_START ? heldMs - BAR_START : 0;
+    uint8_t  filled  = (uint8_t)((elapsed * 5) / BAR_SPAN);
     if (filled > 5) filled = 5;
 
     // Nothing visible has changed since the last call — skip the I2C transfer.
@@ -94,9 +97,12 @@ void Display::showResetBar(uint32_t heldMs) {
     if (!ok_) return;
     timerActive_ = false;
 
-    // 15-segment bar filling from 8s to 23s
-    uint32_t elapsed = heldMs > RESET_START_MS ? heldMs - RESET_START_MS : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 15) / (RESET_END_MS - RESET_START_MS));
+    // 15-segment bar filling across the window the reset trigger spans
+    constexpr uint32_t BAR_START = HoldTimings::RESET_START_MS;
+    constexpr uint32_t BAR_SPAN  = HoldTimings::RESET_END_MS - BAR_START;
+
+    uint32_t elapsed = heldMs > BAR_START ? heldMs - BAR_START : 0;
+    uint8_t  filled  = (uint8_t)((elapsed * 15) / BAR_SPAN);
     if (filled > 15) filled = 15;
 
     // Nothing visible has changed since the last call — skip the I2C transfer.
@@ -150,6 +156,27 @@ void Display::showWifiLockMessage() {
     timerStart_    = millis();
     timerDuration_ = WIFI_MSG_TIMEOUT_MS;
     timerAction_   = TimerAction::ShowStatus;
+}
+
+void Display::showNotConfigured(bool alwaysOn, const String& profileName) {
+    if (!ok_) return;
+    lastProfile_ = profileName;
+    resetBarCache();
+
+    oled_.clearDisplay();
+    oled_.setTextSize(1);
+    oled_.setTextColor(SSD1306_WHITE);
+    oled_.setCursor(0, 4);
+    oled_.print("Not Configured");
+    oled_.setCursor(0, 18);
+    oled_.print(profileName);
+    oled_.print(": no IR code");
+    oled_.display();
+
+    timerActive_   = true;
+    timerStart_    = millis();
+    timerDuration_ = IR_CONFIRM_TIMEOUT_MS;
+    timerAction_   = alwaysOn ? TimerAction::ShowStatus : TimerAction::TurnOff;
 }
 
 void Display::off() {

@@ -16,6 +16,8 @@ h2 { font-size: 1.1em; margin: 20px 0 10px; color: #ccc; }
 .profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .profile-name { font-weight: 600; font-size: 1.05em; }
 .profile-active-badge { background: #4ecca3; color: #1a1a2e; font-size: 0.75em; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.profile-unset-badge { background: #e6a23c; color: #1a1a2e; font-size: 0.75em; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.badges { display: flex; gap: 6px; }
 
 .field { margin-bottom: 8px; }
 .field label { display: block; font-size: 0.8em; color: #999; margin-bottom: 3px; }
@@ -104,12 +106,20 @@ function render() {
 
   profiles.forEach((p, i) => {
     const isActive = i === settings.active_profile;
+    // A 0x0 code is the "codes not confirmed for this manufacturer" placeholder.
+    // The firmware answers ERR rather than transmitting one, so the profile is
+    // selectable but inert — worth showing before someone picks it and waits
+    // for a TV that is never going to respond.
+    const unset = isUnset(p.on) || isUnset(p.off);
     const div = document.createElement('div');
     div.className = 'card' + (isActive ? ' active' : '');
     div.innerHTML = `
       <div class="profile-header">
         <span class="profile-name">${esc(p.name)}</span>
-        ${isActive ? '<span class="profile-active-badge">Active</span>' : ''}
+        <span class="badges">
+          ${unset ? '<span class="profile-unset-badge">No IR code</span>' : ''}
+          ${isActive ? '<span class="profile-active-badge">Active</span>' : ''}
+        </span>
       </div>
       <div class="field">
         <label>Name</label>
@@ -155,6 +165,12 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// True when a code parses to zero — the firmware's "not configured" marker.
+// Unparseable text lands here too, since the firmware would also read it as 0.
+function isUnset(code) {
+  return !parseInt(String(code).replace(/^0x/i, ''), 16);
+}
+
 function setActive(i) {
   settings.active_profile = i;
   render();
@@ -169,17 +185,57 @@ function addProfile() {
 
 function removeProfile(i) {
   if (profiles.length <= 1) return;
+
+  const deletingActive = settings.active_profile === i;
   profiles.splice(i, 1);
-  if (settings.active_profile >= profiles.length) {
-    settings.active_profile = profiles.length - 1;
-  } else if (settings.active_profile > i) {
-    settings.active_profile--;
+
+  if (deletingActive) {
+    // Deleting the active profile needs an explicit choice. Adjusting only the
+    // indices *around* it left the index pointing at whichever profile slid
+    // into the freed slot, silently making an unrelated TV the active one.
+    // Fall back to the preceding entry and say so — the Active badge moves in
+    // the same render, so the change is visible rather than inferred.
+    settings.active_profile = Math.max(0, i - 1);
+    render();
+    showStatus('Deleted the active profile — "' +
+               profiles[settings.active_profile].name + '" is now active');
+    return;
   }
+
+  if (settings.active_profile > i) settings.active_profile--;
   render();
+}
+
+// Accepts "0x20DF23DC" or a bare "20DF23DC", up to 32 bits.
+const CODE_PATTERN = /^(0x)?[0-9a-fA-F]{1,8}$/;
+
+// Validate before POSTing. The firmware parses an unparseable code as 0x0 and
+// treats 0x0 as "not configured", so a typo does not corrupt anything — but it
+// does produce a profile that silently refuses to transmit, and the place to
+// catch that is here, where the user can still see what they typed.
+function validate() {
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i];
+    const label = p.name && p.name.trim() ? p.name : 'Profile ' + (i + 1);
+
+    if (!p.name || !p.name.trim()) {
+      showStatus('Profile ' + (i + 1) + ' needs a name', true);
+      return false;
+    }
+    for (const key of ['on', 'off']) {
+      if (!CODE_PATTERN.test(String(p[key]).trim())) {
+        showStatus(label + ': ' + key.toUpperCase() +
+                   ' code must be hex, e.g. 0x20DF23DC', true);
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 async function save() {
   try {
+    if (!validate()) return false;
     showStatus('Saving...');
     settings.display_always_on = document.getElementById('alwaysOn').checked;
 

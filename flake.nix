@@ -52,23 +52,25 @@
 
         esp32-ir-daemon = pkgs.stdenv.mkDerivation {
           pname = "esp32-ir-daemon";
-          version = "0.3.0";
+          # Read from daemon/VERSION, the same file CMakeLists reads, so the Nix
+          # package cannot claim a version the build did not produce.
+          version = nixpkgs.lib.fileContents ./daemon/VERSION;
 
           src = ./daemon;
 
           nativeBuildInputs = with pkgs; [ cmake pkg-config ];
           buildInputs = with pkgs; [ hidapi sdbus-cpp_2 ];
 
-          # The upstream CMakeLists has no install() rule — it is built and
-          # copied by hand on FHS distributions. Install explicitly here rather
-          # than patching the shared build file, which must stay portable.
-          installPhase = ''
-            runHook preInstall
-            install -Dm755 esp32-ir-daemon $out/bin/esp32-ir-daemon
-            install -Dm644 $src/99-esp32-ir-remote.rules \
-              $out/lib/udev/rules.d/99-esp32-ir-remote.rules
-            runHook postInstall
-          '';
+          # No installPhase — the CMakeLists now carries install() rules, so the
+          # default cmake hook does the right thing with CMAKE_INSTALL_PREFIX
+          # set to $out: the binary to $out/bin (which lib.getExe resolves via
+          # mainProgram) and the udev rule to $out/lib/udev/rules.d, exactly
+          # where services.udev.packages looks for it.
+          #
+          # The unit file installed alongside is unused here — the NixOS module
+          # below declares the service natively — but it costs nothing and
+          # keeping one install path shared with every other distribution is the
+          # whole point.
 
           meta = with pkgs.lib; {
             description = "Mirrors PC power state to a TV over IR, as a CEC alternative";
@@ -117,7 +119,9 @@
 
             systemd.services.esp32-ir-remote = {
               description = "ESP32 IR Remote Daemon";
-              after = [ "systemd-logind.service" ];
+              # Mirrors esp32-ir-remote.service — dbus.socket ordered explicitly
+              # so the daemon cannot lose the race to the system bus at boot.
+              after = [ "dbus.socket" "systemd-logind.service" ];
               requires = [ "systemd-logind.service" ];
               wantedBy = [ "multi-user.target" ];
 

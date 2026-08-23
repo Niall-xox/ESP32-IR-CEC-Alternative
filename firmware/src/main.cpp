@@ -4,13 +4,19 @@
 // daemon as HID output reports, fires the IR signal for the active manufacturer
 // profile, updates the OLED display, and sends a response as an input report.
 //
-// Communication protocol:
-//   PC → ESP32:  64-byte output report, command string in first bytes
-//   ESP32 → PC:  64-byte input report, response string in first bytes
+// Communication protocol (v2 — sequence-correlated):
+//   PC → ESP32:  64-byte output report, [0] = sequence, [1..] = NUL-terminated command
+//   ESP32 → PC:  64-byte input report,  [0] = echoed sequence, [1..] = NUL-terminated response
 //
 //   ON   → fire IR ON  for active profile → ACK
 //   OFF  → fire IR OFF for active profile → ACK
-//   ???  → ERR
+//   ON/OFF with an unset (0x0) code       → ERR
+//   ???                                   → ERR
+//
+// The sequence byte is echoed rather than interpreted. It exists so the daemon
+// can tell this reply apart from a late reply to an earlier command: without it
+// an ACK that arrived after the daemon gave up satisfied the *next* command's
+// read, reporting success for an IR signal that may never have fired.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -101,6 +107,11 @@ public:
     }
 
     void _onOutput(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
+        // A command is a sequence byte plus at least one character. Anything
+        // shorter cannot be one, and accepting it would leave loop() parsing
+        // whatever the previous report left behind in rxBuf_.
+        if (len < 2) return;
+
         uint16_t copyLen = min((int)len, REPORT_SIZE - 1);
         memcpy(rxBuf_, buffer, copyLen);
         rxBuf_[copyLen] = '\0';
@@ -124,9 +135,20 @@ public:
 VendorHID hidDevice;
 
 // ---------------------------------------------------------------------------
-// IR dispatch — synchronous, blocks until the full signal is transmitted
+// IR dispatch — synchronous, blocks until the full signal is transmitted.
+//
+// Returns false without transmitting when the active profile has no code set
+// for this direction. A 0x0 code is the placeholder for a manufacturer whose
+// discrete codes have not been confirmed yet; sending it puts a meaningless
+// frame on the air, and the caller must not report that as success.
 // ---------------------------------------------------------------------------
-void sendIR(const Profile& profile, bool on) {
+bool sendIR(const Profile& profile, bool on) {
+    if (!Profiles::isConfigured(profile, on)) {
+        Serial.printf("[ir] %s has no %s code configured — not transmitting\n",
+                      profile.name.c_str(), on ? "ON" : "OFF");
+        return false;
+    }
+
     uint32_t code = on ? profile.onCode : profile.offCode;
     switch (profile.protocol) {
         case IrProtocol::SAMSUNG:
@@ -140,6 +162,7 @@ void sendIR(const Profile& profile, bool on) {
             irSend.sendNEC(code, kNECBits);
             break;
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,16 +183,10 @@ void startWifi() {
     server.on("/api/profiles", HTTP_GET, []() {
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
+        // Profiles::toJson is the same serialiser LittleFS writes through, so
+        // the web API and the on-disk format cannot drift apart.
         for (const auto& p : Profiles::getAll()) {
-            JsonObject obj = arr.add<JsonObject>();
-            char onBuf[11], offBuf[11];
-            snprintf(onBuf,  sizeof(onBuf),  "0x%08X", p.onCode);
-            snprintf(offBuf, sizeof(offBuf), "0x%08X", p.offCode);
-            obj["name"]     = p.name;
-            obj["protocol"] = Profiles::protocolToString(p.protocol);
-            obj["on"]       = onBuf;
-            obj["off"]      = offBuf;
-            obj["visible"]  = p.visible;
+            Profiles::toJson(p, arr.add<JsonObject>());
         }
         String json;
         serializeJson(doc, json);
@@ -193,6 +210,11 @@ void startWifi() {
         }
         if (newProfiles.empty()) {
             server.send(400, "application/json", "{\"error\":\"At least one profile required\"}");
+            return;
+        }
+        if (newProfiles.size() > Profiles::MAX_PROFILES) {
+            server.send(400, "application/json",
+                        "{\"error\":\"Too many profiles\"}");
             return;
         }
         Profiles::replaceAll(std::move(newProfiles));
@@ -400,6 +422,16 @@ void setup() {
     // reset pressCount so the next press is treated as a first press again.
     display.onExpire = []() { pressCount = 0; };
 
+    // Draw the status screen once the display and profiles are both up.
+    //
+    // Without this the OLED stayed blank from boot until the first button press
+    // or IR command, which contradicted "display always on" outright — the one
+    // setting whose entire purpose is that the screen is never blank. With the
+    // setting off, showStatus starts its own 2s timer, so this doubles as a
+    // boot confirmation and then turns itself off.
+    display.showStatus(Profiles::getActive().name,
+                       Profiles::getSettings().displayAlwaysOn);
+
     irSend.begin();
 
     hidDevice.begin();
@@ -429,28 +461,39 @@ void loop() {
     if (!hidDevice.received_) return;
     hidDevice.received_ = false;
 
-    String cmd = String((char*)hidDevice.rxBuf_);
+    // [0] is the daemon's sequence byte, echoed back untouched so it can match
+    // this reply to the command it sent. The command string starts at [1].
+    const uint8_t seq = hidDevice.rxBuf_[0];
+
+    String cmd = String((char*)hidDevice.rxBuf_ + 1);
     cmd.trim();
 
+    const bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
+    const Profile& active = Profiles::getActive();
+
     uint8_t response[REPORT_SIZE] = {0};
+    response[0] = seq;
 
-    if (cmd == "ON") {
-        sendIR(Profiles::getActive(), true);
-        display.showIRConfirm(true,
-                              Profiles::getSettings().displayAlwaysOn || wifiActive,
-                              Profiles::getActive().name);
-        response[0] = 'A'; response[1] = 'C'; response[2] = 'K';
-
-    } else if (cmd == "OFF") {
-        sendIR(Profiles::getActive(), false);
-        display.showIRConfirm(false,
-                              Profiles::getSettings().displayAlwaysOn || wifiActive,
-                              Profiles::getActive().name);
-        response[0] = 'A'; response[1] = 'C'; response[2] = 'K';
-
-    } else {
-        response[0] = 'E'; response[1] = 'R'; response[2] = 'R';
+    // ACK only once the IR signal has actually gone out. An unconfigured
+    // profile transmits nothing, so it answers ERR — reporting success there
+    // would leave the daemon logging a TV state change that never happened.
+    bool ok = false;
+    if (cmd == "ON" || cmd == "OFF") {
+        const bool on = (cmd == "ON");
+        ok = sendIR(active, on);
+        if (ok) {
+            display.showIRConfirm(on, alwaysOn, active.name);
+        } else {
+            display.showNotConfigured(alwaysOn, active.name);
+        }
     }
 
-    hidDevice.send(response);
+    memcpy(response + 1, ok ? "ACK" : "ERR", 3);
+
+    if (!hidDevice.send(response)) {
+        // The daemon is waiting on this and will time out without it. Nothing
+        // to retry against — the report queue is full or USB is not ready —
+        // but it must not pass silently.
+        Serial.println("[hid] Failed to queue response report");
+    }
 }

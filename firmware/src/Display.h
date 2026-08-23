@@ -9,12 +9,15 @@
 //   HOLD_BAR   — 5-block progress bar while button held (config mode countdown)
 //   RESET_BAR  — 15-segment bar when held past config threshold
 //   WIFI_MSG   — "Hold Button to Exit Wireless Mode..." on press 2 in WiFi mode
+//   NOT_CONFIG — "Not Configured" when the active profile has no IR code set
 //
 // Timed states expire automatically — call update() on every loop() iteration.
 
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <functional>
+
+#include "HoldTimings.h"
 
 class Display {
 public:
@@ -46,6 +49,11 @@ public:
 
     // Show "Hold Button to Exit Wireless Mode to Switch Profiles" for 2s.
     void showWifiLockMessage();
+
+    // Show "Not Configured" for 2s after an IR command that could not be sent
+    // because the active profile's code for that direction is still 0x0.
+    // Behaves like showIRConfirm otherwise — same timeout, same return state.
+    void showNotConfigured(bool alwaysOn, const String& profileName);
 
     // Turn display off.
     void off();
@@ -91,7 +99,4 @@ private:
     static constexpr uint32_t STATUS_TIMEOUT_MS     = 2000;
     static constexpr uint32_t IR_CONFIRM_TIMEOUT_MS = 2000;
     static constexpr uint32_t WIFI_MSG_TIMEOUT_MS   = 2000;
-    static constexpr uint32_t CONFIG_MS             = 5000;
-    static constexpr uint32_t RESET_START_MS        = 8000;
-    static constexpr uint32_t RESET_END_MS          = 23000;
 };

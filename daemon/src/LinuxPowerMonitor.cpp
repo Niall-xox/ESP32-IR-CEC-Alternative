@@ -1,6 +1,7 @@
 #include "LinuxPowerMonitor.h"
 
 #include <iostream>
+#include <stdexcept>
 
 // logind D-Bus coordinates
 static constexpr auto LOGIND_SERVICE   = "org.freedesktop.login1";
@@ -42,7 +43,14 @@ LinuxPowerMonitor::LinuxPowerMonitor() {
     // Take the inhibitor lock upfront. It must be held before any signal fires —
     // taking it reactively inside the handler risks a race where systemd doesn't
     // see us in time and proceeds without waiting.
-    takeInhibitorLock();
+    //
+    // Failing here means logind refused the very first Inhibit(), which is a
+    // broken environment rather than a transient hiccup. Better to exit and let
+    // systemd restart us than to run on looking healthy while never once
+    // delaying a suspend.
+    if (!takeInhibitorLock()) {
+        throw std::runtime_error("logind refused the initial inhibitor lock");
+    }
 }
 
 LinuxPowerMonitor::~LinuxPowerMonitor() {
@@ -57,24 +65,32 @@ void LinuxPowerMonitor::run() {
     connection_->enterEventLoop();
 }
 
-void LinuxPowerMonitor::takeInhibitorLock() {
+bool LinuxPowerMonitor::takeInhibitorLock() {
     // Inhibit() arguments:
     //   what  — "sleep:shutdown" so one lock covers both event types
     //   who   — identifier shown in `systemd-inhibit --list` and journalctl
     //   why   — reason shown alongside the who field
     //   mode  — "delay" defers the action temporarily; "block" would prevent it entirely
-    sdbus::UnixFd fd;
-    proxy_->callMethod("Inhibit")
-        .onInterface(LOGIND_INTERFACE)
-        .withArguments(
-            std::string("sleep:shutdown"),
-            std::string("esp32-ir-remote"),
-            std::string("Sending IR command to TV"),
-            std::string("delay"))
-        .storeResultsTo(fd);
+    try {
+        sdbus::UnixFd fd;
+        proxy_->callMethod("Inhibit")
+            .onInterface(LOGIND_INTERFACE)
+            .withArguments(
+                std::string("sleep:shutdown"),
+                std::string("esp32-ir-remote"),
+                std::string("Sending IR command to TV"),
+                std::string("delay"))
+            .storeResultsTo(fd);
 
-    inhibitorFd_ = std::move(fd);
-    std::cout << "[inhibitor] Lock acquired\n";
+        inhibitorFd_ = std::move(fd);
+        std::cout << "[inhibitor] Lock acquired\n";
+        return true;
+    } catch (const std::exception& e) {
+        // Never propagate: this runs inside D-Bus signal handlers.
+        std::cerr << "[inhibitor] Failed to acquire lock: " << e.what()
+                  << " — sleep and shutdown will not be delayed\n";
+        return false;
+    }
 }
 
 void LinuxPowerMonitor::releaseInhibitorLock() {
@@ -105,6 +121,16 @@ void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
         // system must not be blocked from shutting down.
         try { if (onShutdown_) onShutdown_(); } catch (...) {}
         releaseInhibitorLock();
+    } else {
+        // Shutdown was cancelled (e.g. `shutdown -c` during a scheduled one)
+        // and the machine is staying up. The lock was released on the way in,
+        // so it has to be re-taken here exactly as the resume path does.
+        //
+        // Doing nothing left the daemon permanently unlocked: every later sleep
+        // and shutdown then proceeded without waiting, and the OFF raced the
+        // machine going down. Silent, permanent, and indistinguishable from
+        // working right up until the TV stayed on.
+        std::cout << "[event] Shutdown cancelled\n";
+        takeInhibitorLock();
     }
-    // start = false means shutdown was cancelled; no action needed
 }
