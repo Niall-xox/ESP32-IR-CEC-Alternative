@@ -60,6 +60,12 @@ private:
     // an order that changes on every replug.
     hid_device* openMatching();
 
+    // Logs the report descriptor the *host* holds, which is what Windows
+    // derives the required write length from. Called when a write fails,
+    // because that is where the difference between it and the firmware's
+    // descriptor explains the failure.
+    void logReportDescriptor();
+
     void closeDevice();
 
     // Discards reports left over from commands that already timed out.

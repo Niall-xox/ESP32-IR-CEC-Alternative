@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <cwchar>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -133,6 +134,54 @@ hid_device* HIDTransport::openMatching() {
     return opened;
 }
 
+// Dumps the report descriptor as the *host* parsed it, which is not necessarily
+// the one the firmware meant to publish.
+//
+// Windows derives the required output-report length from this and rejects a
+// write that does not match, so a descriptor fetched during a window where the
+// device was not ready produces a handle that opens cleanly and then fails
+// every write. It is cached against the device instance, so it persists across
+// process restarts and clears only on re-enumeration — an intermittency that
+// follows replugs rather than time.
+//
+// The firmware's descriptor is 34 bytes and ends 0x91 0x02 0xC0: an Output item
+// then end-collection. A short dump, or one with no 0x91, is the host holding a
+// descriptor with no output report — nowhere to write to.
+void HIDTransport::logReportDescriptor() {
+#if defined(HID_API_VERSION_MAJOR) && \
+    (HID_API_VERSION_MAJOR > 0 || HID_API_VERSION_MINOR >= 14)
+    unsigned char desc[256];
+    const int n = hid_get_report_descriptor(dev_, desc, sizeof(desc));
+    if (n < 0) {
+        std::cerr << "[transport] Could not read the report descriptor ("
+                  << narrow(hid_error(dev_)) << ")\n";
+        return;
+    }
+
+    std::cerr << "[transport] Report descriptor as the host parsed it (" << n
+              << " bytes, firmware publishes 34):";
+    for (int i = 0; i < n; ++i) {
+        std::cerr << " " << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<unsigned>(desc[i]);
+    }
+    std::cerr << std::dec << std::setfill(' ') << "\n";
+
+    bool hasOutput = false;
+    for (int i = 0; i + 1 < n; ++i) {
+        if (desc[i] == 0x91) { hasOutput = true; break; }
+    }
+    if (!hasOutput) {
+        std::cerr << "[transport] No Output item (0x91) in that descriptor — the host"
+                     " believes this device cannot be written to. Re-enumerate the"
+                     " device (unplug and replug) and check the firmware starts HID"
+                     " before USB.\n";
+    }
+#else
+    std::cerr << "[transport] hidapi is older than 0.14 — cannot report the"
+                 " descriptor the host parsed\n";
+#endif
+}
+
 bool HIDTransport::ensureOpen(TimePoint deadline) {
     if (dev_) return true;
 
@@ -202,6 +251,7 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
         // that is not the ESP32 at all, and those want opposite responses.
         std::cerr << "[transport] Write failed (" << narrow(hid_error(dev_))
                   << ") — reopening device\n";
+        logReportDescriptor();
         closeDevice();
         if (!ensureOpen(deadline)) {
             std::cerr << "[transport] ESP32 not found after reopen — skipping: " << cmd << "\n";
