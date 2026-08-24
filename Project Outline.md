@@ -480,18 +480,46 @@ daemon/
 
 ## Windows — in progress
 
-The current focus. Everything below is planned, not done. Nothing here has been
-compiled or run on Windows; a machine to test on became available 2026-08-24.
+The current focus. **Written 2026-08-24, not yet run.** The implementation
+below exists and compiles; nothing in it has been executed on Windows. A machine
+to test on became available the same day.
 
 ### Where it stands
 
-`WindowsPowerMonitor.*` exists but was written to prove the `IPowerMonitor`
-boundary held, not to work. It has never been built or executed. It also
-predates fix 1 and the sequenced protocol, so the Windows build is stale on top
-of untested.
+`WindowsPowerMonitor.*` has been rewritten against the design in this section.
+Both files compile clean under `-Wall -Wextra` via an x86_64-w64-mingw32
+cross-compile, which is a syntax and type check, **not** evidence that any of it
+behaves correctly — the MSVC build and every runtime assumption remain unproven.
+The Linux daemon still builds and the installed service is unaffected.
+
+The previous `WindowsPowerMonitor.*` was written to prove the `IPowerMonitor`
+boundary held, not to work. It had never been built or executed, and it predated
+both fix 1 and the sequenced protocol. It has been replaced rather than edited,
+for the reason in the decisions table: its comments asserted things that were
+false, and wrong comments outlive wrong code.
 
 An earlier version of this brief claimed Windows was "confirmed working". That
 was a typo and is not true — recorded here so the claim does not resurface.
+
+An earlier version of *this plan* was written against a single Windows
+configuration — a classic S3 desktop with Fast Startup disabled — and would have
+failed on the two that are more common, in both cases by reporting a plausible
+wrong reason rather than an error. See
+[Windows is three configurations](#windows-is-three-configurations-not-one).
+
+### Where the implementation departs from the plan
+
+Six things came out differently once the code was written. Recorded because a
+plan that silently stopped matching its implementation is worse than no plan.
+
+| | What changed, and why |
+|---|---|
+| **Service detection** | The plan chose `StartServiceCtrlDispatcherW` failing with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` as the test for "running as a service". It is the standard test and it cannot be used here: the redirect has to be decided before the first log line, and that call blocks until the service stops. A `--console` flag decides it instead; the dispatcher failure is still handled, to print guidance rather than exit silently. |
+| **What `--console` does** | Not a foreground daemon — power events reach services only, so there would be nothing to listen for. It sends one `ON` and reports the ACK, which makes it a device-reachability check that needs nothing installed. The first useful thing to run after a build. |
+| **Callbacks return `bool`** | `IPowerMonitor`'s callbacks were `void`. Suppressing repeat commands needs to know whether the device confirmed: recording an attempt that was never ACKed as the TV's new state would suppress the retry and leave it wrong indefinitely — the "reports success regardless" failure in a new place. Linux ignores the answer, having no such state. |
+| **Preshutdown timeout** | Set by the installer as the `PreshutdownTimeout` registry value, which is what `ChangeServiceConfig2` writes anyway, rather than by the service to itself at startup. It is install-time configuration and belongs with the rest of it. |
+| **`GUID_CONSOLE_DISPLAY_STATE`** | Spelled out in the source rather than taken from the SDK, which declares the power-setting GUIDs but leaves their definitions in a library whose name varies by SDK version. One line, and one fewer link-time question. |
+| **A third conditional in `main.cpp`** | The startup `ON` block is now inside `#ifdef __linux__`, against the stated end-state of exactly one. The honest alternative was a `justBooted()` on `IPowerMonitor` that Windows answers "never" — machinery to avoid a two-line guard. Noted rather than hidden. |
 
 ### What needs no work at all
 
@@ -499,6 +527,11 @@ The transport layer is genuinely shared. `ITransport`, `IPowerMonitor` and
 `HIDTransport` contain **zero** platform conditionals, hidapi covers the Win32
 HID backend, and `CMakeLists.txt` already resolves it through vcpkg. That was
 the point of the abstraction and it held.
+
+The firmware needs nothing either. Its report descriptor declares a
+vendor-defined usage page (`0xFF00`), so Windows binds `hidclass` automatically:
+no driver to write, no INF to sign, and none of the access restrictions Windows
+places on keyboard and mouse top-level collections.
 
 ### The architectural difference — accepted, not solved
 
@@ -524,6 +557,106 @@ it is the only evidence the IR actually fired, on the platform with no console.
 Dropping to fire-and-forget would reintroduce exactly the "reports success
 regardless" failure that fixes 1, 12, 13 and 21 all addressed.
 
+### Windows is three configurations, not one
+
+Windows varies along two independent axes, and the combinations are not edge
+cases. This plan originally targeted the rarest of them.
+
+**Boot.** Fast Startup — on by default wherever hibernation is enabled — makes
+"shut down" a hibernation of the kernel session rather than a true shutdown. The
+tick count does not reset across it. That is why Task Manager reports multi-day
+uptime on a machine that gets shut down every night.
+
+**Sleep.** A machine supports either classic S3 suspend or Modern Standby (S0
+low power idle). It is a property of the platform firmware: never both, and not
+switchable.
+
+| Configuration | Boot ON | Sleep OFF |
+|---|---|---|
+| S3, Fast Startup off | uptime gate works | `PBT_APMSUSPEND`, ~2s grace |
+| S3, Fast Startup on | **uptime gate never fires** | `PBT_APMSUSPEND`, ~2s grace |
+| Modern Standby | **uptime gate never fires** | no classic suspend — `PBT_APMSUSPEND` may not arrive usefully at all |
+
+Porting `systemJustBooted()` with `GetTickCount64()` is the obvious translation
+and it is correct only in the first row. In the other two the machine powers on
+carrying a tick count of hours, the gate skips, and the daemon logs `ON skipped
+— service restarted on an already-running system, not a boot`. That is worse
+than a missed command: it is a wrong reason recorded in the log, for the one
+feature the device exists to provide.
+
+It compounds. On a Fast Startup power-on the kernel resume completes before the
+SCM starts services, so the daemon registers its control handler too late to
+catch a resume broadcast either. Both routes to "TV on when the PC turns on"
+close at the same time.
+
+Modern Standby is the other half. Machines using S0 low-power idle never enter
+S3, the power-event model differs, and the plan had a *check* for it
+(`powercfg /a`) but no design for the branch where the check comes back S0.
+A product cannot ship a sleep path that only works on one of two power models.
+
+### Driving from display state
+
+One mechanism covers all three configurations:
+`RegisterPowerSettingNotification` on `GUID_CONSOLE_DISPLAY_STATE`, with
+`DEVICE_NOTIFY_SERVICE_HANDLE`. Notifications arrive through the service control
+handler that already exists, as `SERVICE_CONTROL_POWEREVENT` carrying
+`dwEventType = PBT_POWERSETTINGCHANGE`.
+
+| Question | Suspend/resume events | Display state |
+|---|---|---|
+| Boot ON under Fast Startup | never fires | registration delivers the current value — display on at boot → ON |
+| Unattended 3am wake | `PBT_APMRESUMEAUTOMATIC` turns the TV on | display stays off on a maintenance wake → nothing fires |
+| Modern Standby sleep | no design | this *is* the documented S0ix signal |
+| S3 sleep | `PBT_APMSUSPEND`, works | display goes off ahead of the suspend anyway |
+
+**Why being liberal about triggers is safe.** The IR codes are discrete, not
+toggle — see [Manufacturer profiles](#manufacturer-profiles), where that choice
+was made so the TV reaches the right state regardless of prior drift. The
+consequence here is that re-asserting a state the TV is already in is a no-op at
+the TV. So display state and `PBT_APMSUSPEND` can both be handled without either
+having to be exactly right; whichever arrives first wins and the other is
+absorbed. Track the last asserted state and skip a send that would repeat it, so
+the duplicate costs nothing at all — which matters inside a two-second grace
+period, where two IR transmissions would not fit comfortably.
+
+**What disappears.** `systemJustBooted()` never gains a Windows branch. The
+question "was this a boot or a `sc restart`?" exists on Linux only because a
+restart would assert ON with nobody at the machine — see the comment at the top
+of `systemJustBooted()`. Display state answers presence directly, so the
+question dissolves rather than needing an answer harder than `/proc/uptime`.
+
+**Why not resume events alone.** `PBT_APMRESUMEAUTOMATIC` is documented as
+firing on every resume *and* as explicitly not implying the user is present:
+wake timers, maintenance windows and update-driven wakes all raise it. Handling
+it alone therefore reintroduces, by a different route, the exact defect the
+uptime gate was written to remove — a daemon turning the TV on at 3am with
+nobody there. Handling only `PBT_APMRESUMESUSPEND`, as the code does today,
+fails the opposite way and leaves the TV off for Wake-on-LAN. The two events are
+a *presence discriminator*; choosing one throws away the information. They also
+cannot be collapsed at the point of arrival, because AUTOMATIC comes first and
+whether RESUMESUSPEND follows is not yet known.
+
+**The behaviour this changes, deliberately.** Display-off on an idle timeout
+turns the TV off while the user is still sitting there. That is the right state
+for this device — a TV displaying a blanked desktop is not a state anyone wants
+— and the case worth worrying about is already handled upstream: media players
+assert `ES_DISPLAY_REQUIRED`, so the screen does not blank during playback. It
+is nonetheless a divergence from the Linux behaviour, recorded here as a choice
+rather than left to surface as a surprise.
+
+**Two things to confirm before committing to this**, since the boot ON depends
+entirely on the first:
+
+- that registration delivers the current display state immediately, rather than
+  only on the next change;
+- that `GUID_CONSOLE_DISPLAY_STATE` reaches a session-0 service as documented —
+  `GUID_SESSION_DISPLAY_STATUS` is the per-session equivalent for user
+  applications, and the two are easy to confuse.
+
+If the first turns out to be false, the fallback is asserting ON at service
+start unconditionally, which is wrong only for a restart that happens while the
+display is off.
+
 ### Required changes
 
 **`WindowsPowerMonitor.cpp` — rewrite rather than edit.** The Win32 boilerplate
@@ -537,37 +670,60 @@ are false and it is the mental model, not the syntax, that produced the bugs.
 | Remove | The blocking-in-handler model. |
 | Remove | Comments claiming the handler "achieves the same guarantee as the Linux inhibitor lock" and that "the OS waits for the handler to return before suspending". Both untrue. |
 | Remove | The local `stopEvent` that nothing ever signals, so the process lingers holding the HID device open and an immediate restart cannot find the ESP32. |
-| Add | Handling for `PBT_APMRESUMEAUTOMATIC`, which fires on *every* resume. Only `PBT_APMRESUMESUSPEND` is handled today, and Windows sends that one *additionally*, for user-initiated wakes only — so Wake-on-LAN and scheduled wakes currently leave the TV off. See the decisions table: AUTOMATIC alone covers every case, so no dedup flag is needed. |
+| Add | `RegisterPowerSettingNotification` on `GUID_CONSOLE_DISPLAY_STATE`. The `POWERBROADCAST_SETTING` it delivers is valid only for the duration of the handler call, so the value must be copied out before returning. The handler currently discards `eventData` entirely. |
+| Add | `PBT_APMSUSPEND` and `PBT_APMRESUMEAUTOMATIC` as secondary triggers, absorbed by the last-asserted-state check rather than deduplicated by hand. |
+| Add | Last-asserted-state member; a send that would repeat the current state is skipped. |
+| Add | Generation counter, bumped on every power transition. The worker discards queued or in-flight work belonging to a previous generation — see [in-flight work across a suspend](#threading-model--worker-thread). |
 | Add | Stop event as a member, signalled from `SERVICE_CONTROL_STOP`. |
 | Add | `SERVICE_PRESHUTDOWN_INFO` to set the preshutdown timeout explicitly rather than inheriting the default. |
+| Add | Serialisation around `SERVICE_STATUS` and `SetServiceStatus`, now called from two threads. |
+| Add | `ERROR_CALL_NOT_IMPLEMENTED` for unhandled control codes, and a status report for `SERVICE_CONTROL_INTERROGATE`. The handler returns `NO_ERROR` for everything today, which claims support it does not have. |
 | Change | Worker-thread model: the handler signals and returns promptly, reporting `SERVICE_*_PENDING` with advancing checkpoints while the work happens. Blocking inside the handler is against the documented contract. |
 
 **`WindowsPowerMonitor.h`** — structurally fine, same class and overrides. Needs
-the new members (stop event handle, dedup flag, worker) and its doc comment
-rewritten; it carries the same false parity claim.
+the new members (stop event, power-setting notification handle, last asserted
+state, generation counter, worker, status mutex) and its doc comment rewritten;
+it carries the same false parity claim.
 
-**`daemon/src/main.cpp`** — two things, both small:
+**`daemon/src/main.cpp`**:
 
 | | Change |
 |---|---|
-| Add | `GetTickCount64()` branch in `systemJustBooted()`. Currently `#ifdef __linux__` reads `/proc/uptime` and Windows falls through to `return true`, so the TV switches on for every service restart. |
-| Change | Logging destination. A Windows service has no console, so every `std::cout` vanishes and `std::unitbuf` does nothing. **Open decision — see below.** |
+| Unchanged | `systemJustBooted()` stays inside `#ifdef __linux__`, returning `true` elsewhere. Windows answers the presence question through display state instead, so no `GetTickCount64()` branch is written. |
+| Add | Single-instance guard via a named mutex. hidapi's Win32 backend opens the device with read and write sharing, so a hand-run copy and the service can both hold it and either can consume the other's ACK — a false ACK, which is the failure the sequence byte exists to eliminate. The console-logging decision below makes running by hand a supported case, so this is a door the plan itself opens. |
+| Change | Logging destination. A Windows service has no console, so every `std::cout` vanishes and `std::unitbuf` does nothing. See [Logging](#logging--decided). |
 
-**`daemon/src/HIDTransport.cpp`** — platform-specific timeouts. The current
-values are sized against logind's 5s; on a Windows suspend `ACK_TIMEOUT` alone
-would consume the whole grace period.
+**`daemon/src/HIDTransport.cpp` — the budget becomes a parameter, not a
+platform constant.** The current values are sized against logind's 5s. A Windows
+suspend needs roughly 1500ms total with a ~500ms ACK wait, but those numbers are
+wrong for Windows *shutdown* and *boot*, where the SCM allows minutes and where
+a reopen after a replug cannot fit in 500ms.
 
-| | Linux (unchanged, proven) | Windows (starting point) |
+The budget is not platform-specific, it is **event**-specific: how long will
+this OS wait for me, for *this* event? Linux answers 5s for both sleep and
+shutdown; Windows answers ~2s for sleep and minutes for shutdown.
+
+| Event | Linux | Windows |
 |---|---|---|
-| `SEND_BUDGET` | 4000ms | ~1500ms |
-| `ACK_TIMEOUT` | 2000ms | ~500ms |
+| Sleep | 4000ms (unchanged, proven) | ~1500ms |
+| Wake / boot / shutdown | 4000ms (unchanged, proven) | 4000ms |
 
-Short enough to fail fast inside the window rather than block through the
-suspend. Linux keeps exactly what it has. Numbers to be confirmed by measuring
-the real grace period.
+Implemented as `send(cmd, budget = SEND_BUDGET)`: the Linux call sites and the
+archived CDC transport are untouched, and only the Windows sleep path passes
+anything. This was previously deferred to a later consolidation pass on the
+grounds that it was an expensive interface change. With a defaulted parameter it
+is not, and the argument for the worker thread below — that an invariant nothing
+enforces will eventually be violated — applies here with equal force. A
+`#if defined(_WIN32)` pair of constants would be that invariant.
 
 **`daemon/CMakeLists.txt`** — every `install()` rule and the whole CPack block
 are inside `if(UNIX AND NOT APPLE)`. Windows has no install path at all.
+
+**`.github/workflows/packages.yml`** — add a `windows-latest` job that
+configures and builds, on push rather than on tags. The Windows sources have
+never been compiled even once, and nothing currently would notice if they stopped
+compiling. This is the cheapest item on the list by a wide margin and the only
+one that turns "stale on top of untested" into a standing guarantee.
 
 ### Logging — decided
 
@@ -583,9 +739,21 @@ the SCM, which is the standard way to tell "running as a service" from "run by
 hand in a terminal". Console output stays untouched in the second case, so
 development does not mean tailing a file.
 
+**The log path and the service account are one decision, not two.** LocalSystem
+starts with a working directory of `System32`, and a low-privilege account
+cannot write beside the binary in `Program Files` — so "LocalService once
+tested" and "a log file" constrain each other. The destination is
+`%ProgramData%\ESP32IRRemote\`, resolved through
+`SHGetKnownFolderPath(FOLDERID_ProgramData)` rather than a relative path, with
+the ACL set by the installer.
+
 The log gains a size check at startup — rename to `.old` past a megabyte. At the
 daemon's rate, a handful of lines a day, that is under a megabyte a year; the
-check is insurance, not a rotation scheme.
+check is insurance, not a rotation scheme. It runs before the file is opened,
+which is the only ordering that works: Windows has no rename-over-open
+semantics, so a rename fails outright while any handle is held. A crashed
+instance still holding the file during the 5s restart delay is the case to
+tolerate rather than treat as an error.
 
 Event Log was the alternative. It is the idiomatic choice and self-bounding, but
 it needs a registered event source, a message resource DLL for clean formatting,
@@ -599,38 +767,34 @@ Once both platforms are verified working, logging should move behind an
 interface the way transport and power events already are. This is deliberate
 sequencing — get it working, then consolidate — not an oversight.
 
-The gain is larger than swapping a file for the Event Log. Platform-specific
-code is currently scattered across four places, and interfaces are what pull it
-back together:
-
 | Platform-specific today | Behind an interface |
 |---|---|
 | logging: file vs journal | `ILogger` — `FileLogger`, `EventLogLogger`, journal-by-stdout |
-| `systemJustBooted()` — `/proc/uptime` vs `GetTickCount64()` | `IPowerMonitor::justBooted()` — it is a system-power question, and the monitor already owns those |
-| `SEND_BUDGET` / `ACK_TIMEOUT` — `#if defined(_WIN32)` | the monitor supplies it — see below |
 | choosing which implementations to construct | stays; one conditional in `main.cpp` |
 
-The budget one is the most interesting. It is not really *platform*-specific, it
-is **event**-specific: how long will this OS wait for me, for *this* event?
-Linux answers 5s for both sleep and shutdown. Windows answers ~2s for sleep and
-minutes for shutdown. That knowledge belongs to `IPowerMonitor`, which raises
-the event, not to a transport that has no idea why it is being called.
+Two rows that used to be on this list have left it. The send budget is being
+done now as a defaulted parameter rather than deferred, for the reasons in
+[Required changes](#required-changes). And `systemJustBooted()` no longer needs
+consolidating: it stays Linux-only, because the Windows answer to the same
+question comes from display state rather than from an uptime reading. The
+abstraction that looked necessary turned out to be a translation that should not
+have been attempted.
 
-Caveat: acting on that means `ITransport::send()` taking a budget, which is an
-interface change touching both transports and the archived CDC one. Worth doing
-only alongside the rest of the consolidation, not on its own.
-
-End state: exactly one platform conditional in `main.cpp` — which implementations
-to build — and nothing conditional anywhere else.
+End state: exactly one platform conditional in `main.cpp` — which
+implementations to build — and nothing conditional anywhere else.
 
 ### Decisions — settled
 
 | Decision | Chosen | Reasoning |
 |---|---|---|
 | `WindowsPowerMonitor.cpp` / `.h` | **Rewrite both**, keeping the Win32 boilerplate near-verbatim | The existing comments assert things that are false — that the handler "achieves the same guarantee as the Linux inhibitor lock", that "the OS waits for the handler to return before suspending". Wrong comments outlive wrong code, because they get read and believed. The dispatch table, `RegisterServiceCtrlHandlerExW` and `SERVICE_STATUS` setup are correct and get retyped as-is. |
-| Resume events | **`PBT_APMRESUMEAUTOMATIC` only** | Windows documents AUTOMATIC as firing on *every* resume; `RESUMESUSPEND` is additional, and only for user-initiated ones. Handling AUTOMATIC alone covers every case with no dedup state at all. Confirm on hardware by logging both across a user wake and a Wake-on-LAN. |
+| Primary power signal | **`GUID_CONSOLE_DISPLAY_STATE`**, with suspend/resume events kept as secondary triggers | One mechanism covers all three Windows configurations, answers presence directly, and is the documented signal on Modern Standby. Discrete IR codes make the overlap with `PBT_APMSUSPEND` free. |
+| Boot detection | **None on Windows** | The uptime gate does not survive Fast Startup, and display state removes the need for it. `systemJustBooted()` stays Linux-only. |
+| Idle screen blank | **Turns the TV off** | The TV should not be lit showing a blanked desktop, and playback already prevents the blank via `ES_DISPLAY_REQUIRED`. A deliberate divergence from Linux. |
+| Send budget | **Defaulted parameter on `send()`**, not a platform constant | The budget is event-specific, not platform-specific. Windows sleep is the only caller that passes one. |
+| Single instance | **Named mutex** | The service and a hand-run copy can both open the HID device and steal each other's ACKs. |
 | Service account | **LocalSystem now, LocalService once tested** | Whether hidapi's `CreateFile` open works under a low-privilege account is answerable in minutes with a working binary and not at all without one. Mirrors Linux, which ran as root until it worked and was then moved to `esp32ir`. |
-| Install | **`sc create` now, MSI at first release** | Packaging follows a working daemon, as it did on Linux. |
+| Install | **`sc create` now, MSI at first release** | Packaging follows a working daemon, as it did on Linux. Use `start= auto`, not `delayed-auto`: nothing downstream now depends on a boot window, but a delayed start also postpones the first display-state reading by up to two minutes. |
 | Recovery | **Restart on failure, 5s delay** | Mirrors `Restart=on-failure` / `RestartSec=5`. Set in the same `sc` sequence as the install. |
 
 ### Threading model — worker thread
@@ -652,32 +816,107 @@ and fix 16 (timeouts individually fine, collectively over budget): an invariant
 nothing enforces. The worker removes the coupling entirely — the next person
 needs to know nothing about a constant in another file.
 
-A single worker also serialises sends by construction, so no mutex is needed;
-`HIDTransport`'s single-threaded assumption holds without shared code gaining a
-lock it does not need on Linux.
+**What the single worker does and does not make safe.** It serialises sends by
+construction, so `HIDTransport`'s single-threaded assumption holds without shared
+code gaining a lock it does not need on Linux. It does *not* cover
+`SERVICE_STATUS`. Advancing checkpoints while the work happens means the worker
+reports status too, so the struct and `SetServiceStatus` are now touched from
+both the SCM handler thread and the worker. That needs a mutex; the transport
+does not.
+
+**The queue holds a state, not a backlog.** `ON` and `OFF` are idempotent
+assertions about what the TV should be, not commands that each need executing,
+so the queue coalesces to the latest one. A bounded queue that replayed a
+backlog would fire stale commands after a resume.
+
+**In-flight work across a suspend.** The machine suspends ~2s after
+`PBT_APMSUSPEND` regardless, so the worker will sometimes be frozen mid-read and
+thaw on resume, holding a deadline computed before the machine went down and
+facing a device that may have re-enumerated. `HIDTransport` uses
+`std::chrono::steady_clock`, which is `QueryPerformanceCounter`-backed on MSVC,
+and whether it advances across a suspend is platform-dependent. Both answers are
+wrong for us: if it stops, a stale `OFF` completes long after the wake `ON`
+should have; if it advances, the send returns instantly having done nothing and
+reports a failure that did not happen.
+
+The generation counter is the fix, and it is deliberately not a timing
+assumption: every power transition bumps it, and the worker drops anything
+carrying an older value. Correct whichever way the clock behaves.
 
 ### Risks to check on the real machine
 
-- **Modern Standby.** The biggest unknown, and it could invalidate the sleep
-  design rather than merely complicate it. Machines using S0 low-power idle do
-  not enter classic S3 suspend, and the power-event model differs — timing,
-  reliability, and whether `PBT_APMSUSPEND` arrives usefully at all. Check with
-  `powercfg /a` **before** writing anything: if S3 is absent and "Standby (S0
-  Low Power Idle)" is present, the sleep path needs designing against that model
-  instead. Everything else here assumes classic S3.
-- **Thread safety.** The single worker serialises sends, so `HIDTransport`'s
-  single-threaded assumption holds by construction. Worth confirming that no
-  other path can call `send()` concurrently once the worker exists.
-- **The ~2s grace period** is guidance, not a contract. Measure it.
+- ~~**Which configuration this machine is.**~~ Answered 2026-08-24: Modern
+  Standby, Fast Startup on, S3 absent in firmware. See
+  [what can be verified](#what-can-be-verified-without-a-second-machine).
+- **Spurious resumes during DRIPS.** A Modern Standby machine cycles in and out
+  of the low-power state. If `PBT_APMRESUMESUSPEND` is raised on one of those
+  exits while the display is still off, an unguarded handler would light the TV
+  in a dark room. The handler now defers to the last known display state for
+  that reason — watch the log for the `not asserting on` line, which says the
+  guard fired and therefore that the risk was real.
+- **Display-state registration.** That it delivers the current value on
+  registration, and that `GUID_CONSOLE_DISPLAY_STATE` reaches a session-0
+  service. The boot ON depends on both.
+- **The ~2s grace period** is guidance, not a contract. Measure it. On Modern
+  Standby the equivalent question is how much runway a session-0 service gets
+  between display-off and the Desktop Activity Moderator throttling it.
 - **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
   that works under whichever account is chosen.
+- **USB across standby.** Whether the port keeps power, and whether the handle
+  survives. The `OFF` is sent before the transition either way, and a failed
+  write reopens, so this is expected to be benign — worth confirming rather than
+  assuming.
+
+### What can be verified without a second machine
+
+**The test machine is Modern Standby, with Fast Startup enabled.** `powercfg /a`
+on 2026-08-24 reports "Standby (S0 Low Power Idle) Network Connected",
+"Hibernate" and "Fast Startup" as available, and S1/S2/S3 all unavailable
+because *the system firmware does not support* them.
+
+Both axes therefore land on the side the original plan did not handle. There is
+no S3 suspend for `PBT_APMSUSPEND` to announce, and Fast Startup means the tick
+count survives a power cycle, so `GetTickCount64()` would have reported every
+boot as a service restart and the TV would never have come on. Display state is
+not merely the better signal on this machine; it is the only one that can work.
+
+The corollary is a permanent limit, not a scheduling one: **S3 cannot be
+verified here at all.** It is disabled in firmware rather than by policy, so no
+setting turns it on. `PBT_APMSUSPEND` as a suspend trigger ships unverified
+until there is a second machine, and the verification record has to say so
+rather than let the passing Modern Standby run stand in for both.
+
+S3 and Modern Standby are firmware properties, so one machine can only be one of
+them. That is the real constraint on this work — not the code, which is written
+once for both.
+
+The mitigation is that the *logic* is exercisable anywhere. Display-off fires on
+any Windows machine when the monitor idles out, so
+`powercfg /change monitor-timeout-ac 1` and a minute of waiting drives the whole
+path — notification, queue, generation counter, worker, send, ACK — on an S3
+desktop. What genuinely needs Modern Standby hardware is one number: the runway
+between display-off and throttling. That is the same category as the ~2s S3
+figure, and a measurement rather than a design.
+
+Whichever model this machine is not, say so in the verification record rather
+than letting it read as covered.
 
 ### Verification plan
 
 Mirror what was done on Linux, since that is what "up to standard" means here:
-sleep, wake (both user-initiated *and* automatic — the case currently broken),
-shutdown, boot, service restart not sending ON, unconfigured profile answering
-ERR, and graceful behaviour with the ESP32 unplugged.
+
+- sleep and wake, both user-initiated *and* automatic (a scheduled wake or
+  Wake-on-LAN — the case currently broken);
+- an unattended maintenance wake leaving the TV **off**, which is the new
+  behaviour and the one most easily got wrong;
+- shutdown and boot, with Fast Startup **both enabled and disabled** — two runs,
+  since only one of them exercises a true cold boot;
+- idle screen blank turning the TV off, and the display returning turning it on;
+- service restart on a running machine with the display on: the ON is re-asserted
+  and the TV, already on, does not change state;
+- unconfigured profile answering `ERR`;
+- graceful behaviour with the ESP32 unplugged;
+- a hand-run copy refusing to start while the service holds the mutex.
 
 ### Gaps against a genuinely commercial Windows product
 
@@ -689,9 +928,9 @@ rather than discovered later.
 |---|---|
 | **Code signing** | Unsigned binaries and installers trigger SmartScreen warnings, and many corporate environments refuse them outright. A commercial Windows product signs both. Needs a certificate — a real cost, and a lead time. Nothing in the plan currently mentions it. |
 | **Device arrival / removal notification** | Both platforms currently discover a missing ESP32 by *failing a write* and then reopening. Windows offers `SERVICE_CONTROL_DEVICEEVENT` via `RegisterDeviceNotification`, and Linux has udev monitoring. Reacting to a plug event beats retrying blindly, and it is the more idiomatic Windows design. A symmetric gap, not a Windows-only one. |
-| **Installer scope** | An MSI has to do more than register the service: upgrade in place, stop the service before replacing the binary, uninstall cleanly, and remove its directories. "MSI at first release" understates this. |
+| **Installer scope** | An MSI has to do more than register the service: upgrade in place, stop the service before replacing the binary, uninstall cleanly, remove its directories, and set the ACL on the log directory. "MSI at first release" understates this. |
 | **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. "Restart on failure, 5s" specifies one of those. A commercial service decides all of them, including whether to stop retrying eventually. |
-| **Automated tests** | There are none, and Windows makes it two platforms verified by hand. Every future change now needs exercising twice, and the Windows half needs a machine that suspends. |
+| **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across two sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. |
 
 ---
 
@@ -873,28 +1112,54 @@ is unused here, because the module declares the unit natively.
 
 ### Windows
 
-Requires Visual Studio Build Tools + vcpkg + hidapi.
+Requires Visual Studio Build Tools + vcpkg + hidapi. PowerShell throughout —
+these use a backtick for line continuation, not a backslash.
 
-```
-winget install Microsoft.VisualStudio.2022.BuildTools
+```powershell
+# --override matters: BuildTools on its own installs the installer and no
+# compiler. VCTools is the C++ workload.
+winget install Microsoft.VisualStudio.2022.BuildTools --override `
+      "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 winget install Kitware.CMake
 git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 C:\vcpkg\vcpkg install hidapi:x64-windows
 ```
 
-```
-cmake -B daemon/build -S daemon -G "Visual Studio 17 2022" -A x64 \
-      -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake \
+```powershell
+cmake -B daemon/build -S daemon -G "Visual Studio 17 2022" -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
       -DVCPKG_TARGET_TRIPLET=x64-windows
 cmake --build daemon/build --config Release
 ```
+
+The binary lands at `daemon\build\Release\esp32-ir-daemon.exe` with `hidapi.dll`
+beside it, copied there by vcpkg. **The two travel together.** The service runs
+the binary from wherever it was registered, so moving the exe without the DLL
+produces a service that installs and then fails to start.
+
+Check the device before installing anything:
+
+```powershell
+.\daemon\build\Release\esp32-ir-daemon.exe --console
+```
+
+One `ON`, one ACK, then it exits — see [what `--console`
+does](#where-the-implementation-departs-from-the-plan). Install with
+`daemon\packaging\windows\install-service.ps1` from an elevated shell.
 
 hidapi comes from vcpkg via `find_package(hidapi CONFIG)`. PkgConfig is not used
 here — it is guarded behind the Linux branch. The vcpkg target is
 `hidapi::winapi` (not `hidapi::hidapi`), and the include path needs the *parent*
 of the vcpkg include directory, derived at configure time via
 `cmake_path(GET ... PARENT_PATH ...)`.
+
+No other libraries are linked. `SHGetKnownFolderPath` was the one call that
+needed them, and it was dropped: `FOLDERID_ProgramData` is declared by the SDK
+but defined in a library whose availability varies by SDK version, which is a
+link error found by linking and never by compiling. The log path reads
+`%ProgramData%` from the environment instead — a variable every service
+inherits, and not user-redirectable the way per-user known folders are.
 
 ### Packaging & CI
 
