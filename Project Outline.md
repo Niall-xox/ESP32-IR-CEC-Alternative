@@ -55,6 +55,16 @@ sleep/wake/shutdown/boot cycle have all been exercised against the real device
 and daemon. Two items remain untested, neither on the power-sync path — see
 [Still unverified on hardware](#still-unverified-on-hardware).
 
+**Windows — paused mid-bring-up 2026-08-24.** The daemon builds and the device
+answers, and the first run uncovered a real firmware defect: the ESP32 does not
+resume from a USB suspend. Fixed in firmware but **not yet flashed**, and the
+service has never been installed, so the Windows half is unverified end to end.
+Pick it up at [Resume here](#resume-here).
+
+That defect is not Windows-specific. It reaches Linux too — the running daemon
+holds the device open continuously, which is the only reason an idle suspend
+never happens there. Re-verify Linux after flashing.
+
 **Three things block any public release:**
 
 1. Registered VID/PID — currently placeholder `1234:5678`.
@@ -490,17 +500,61 @@ daemon/
 
 ## Windows — in progress
 
-The current focus. **Written 2026-08-24, not yet run.** The implementation
-below exists and compiles; nothing in it has been executed on Windows. A machine
-to test on became available the same day.
+The current focus. **Written and building on Windows; the service has never been
+installed.** Work paused 2026-08-24 — [resume here](#resume-here).
 
 ### Where it stands
 
-`WindowsPowerMonitor.*` has been rewritten against the design in this section.
-Both files compile clean under `-Wall -Wextra` via an x86_64-w64-mingw32
-cross-compile, which is a syntax and type check, **not** evidence that any of it
-behaves correctly — the MSVC build and every runtime assumption remain unproven.
-The Linux daemon still builds and the installed service is unaffected.
+| | State |
+|---|---|
+| Windows build | **Works.** Builds under MSVC via vcpkg. The first time these sources have ever been compiled by a Windows toolchain. |
+| Device reachable | **Verified.** `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
+| USB suspend defect | **Found, root-caused, fixed in firmware — not yet flashed.** See [USB suspend](#usb-suspend--the-defect-the-windows-build-found). |
+| Service | **Never installed.** Everything below the console check is untested. |
+| Display-state design | **Unanswered.** Whether registration reports the current value — the assumption the boot `ON` rests on — needs the service running to find out. |
+| Linux | Unaffected so far, but the firmware has changed underneath it and wants re-verifying after the flash. |
+
+`WindowsPowerMonitor.*` was rewritten against the design in this section. It
+compiles clean under `-Wall -Wextra` via an x86_64-w64-mingw32 cross-compile and
+links as a complete PE, which is a syntax, type and symbol check — **not**
+evidence that any of it behaves correctly. Every runtime assumption in it is
+still unproven.
+
+### Resume here
+
+Ordered, because each step gates the next.
+
+1. **Flash the firmware.** The USB suspend fix is committed and builds but has
+   never run. Manual bootloader entry — hold BOOT, tap RESET, release BOOT —
+   then `cd firmware && pio run -t upload`, and power-cycle to leave download
+   mode. The filesystem is unchanged, so no `uploadfs`.
+
+2. **Re-verify Linux.** The firmware changed under a platform that was already
+   verified. A sleep/wake cycle and a look at the journal is enough; the
+   re-enumeration on resume is new behaviour that Linux will now also see.
+
+3. **Rebuild on Windows and check the console path still works.** Confirms the
+   flash did not break what already worked. Note whether MSVC `/W4` reports
+   anything — the tree is clean under gcc's `-Wall -Wextra`, which is not the
+   same set, and that has not been checked.
+
+4. **Install the service** — elevated, with the ESP32 plugged in first, per
+   [the Windows build steps](#windows). Then read the first twenty lines of
+   `C:\ProgramData\ESP32IRRemote\daemon.log`.
+
+   This answers the display-state question. `[power] ... display state = on` at
+   registration means the boot `ON` works as designed. `no display state
+   reported at registration` means the fallback is carrying it, and the way the
+   opening state is read needs rethinking.
+
+5. **The standby cycle** — the largest open risk, and the one thing the
+   firmware fix has not been shown to survive. Three outcomes to tell apart, in
+   [the risks below](#risks-to-check-on-the-real-machine).
+
+6. **Then the verification plan**, which nothing has yet touched.
+
+Not on this list and still open from before any of it: the release guard on
+`v*` tags, and the registered VID/PID.
 
 The previous `WindowsPowerMonitor.*` was written to prove the `IPowerMonitor`
 boundary held, not to work. It had never been built or executed, and it predated
@@ -1013,20 +1067,34 @@ than letting it read as covered.
 
 ### Verification plan
 
-Mirror what was done on Linux, since that is what "up to standard" means here:
+Mirror what was done on Linux, since that is what "up to standard" means here.
+**Nothing below has been run.** Tick these off in the brief as they pass, the
+way the Linux second pass was recorded, so the record is a record rather than a
+memory.
 
-- sleep and wake, both user-initiated *and* automatic (a scheduled wake or
-  Wake-on-LAN — the case currently broken);
-- an unattended maintenance wake leaving the TV **off**, which is the new
-  behaviour and the one most easily got wrong;
-- shutdown and boot, with Fast Startup **both enabled and disabled** — two runs,
-  since only one of them exercises a true cold boot;
-- idle screen blank turning the TV off, and the display returning turning it on;
-- service restart on a running machine with the display on: the ON is re-asserted
-  and the TV, already on, does not change state;
-- unconfigured profile answering `ERR`;
-- graceful behaviour with the ESP32 unplugged;
-- a hand-run copy refusing to start while the service holds the mutex.
+| | Test | Done |
+|---|---|---|
+| 1 | Device reachable — `--console` sends `ON`, gets the ACK | **yes**, 2026-08-24 |
+| 2 | Sleep and wake, user-initiated | no |
+| 3 | Wake that is *automatic* — a scheduled wake or Wake-on-LAN | no |
+| 4 | An unattended maintenance wake leaving the TV **off** — the new behaviour, and the one most easily got wrong | no |
+| 5 | Shutdown and boot with Fast Startup **enabled** | no |
+| 6 | Shutdown and boot with Fast Startup **disabled** — only this one is a true cold boot | no |
+| 7 | Idle screen blank turning the TV off, and the display returning turning it on | no |
+| 8 | Service restart with the display on: `ON` re-asserted, TV already on, no visible change | no |
+| 9 | Unconfigured profile answering `ERR` | no |
+| 10 | Graceful behaviour with the ESP32 unplugged | no |
+| 11 | A hand-run copy refusing to start while the service holds the mutex | no |
+| 12 | A full Modern Standby cycle with the firmware USB fix in place | no |
+
+Test 12 is not a formality: it is the one the
+[largest open risk](#risks-to-check-on-the-real-machine) turns on. Tests 2, 3
+and 4 cannot be separated on this machine from the display-state behaviour they
+depend on, so read the `[power]` lines alongside each.
+
+`PBT_APMSUSPEND` as a suspend trigger cannot be tested here at all — S3 is
+absent in this machine's firmware. Record that as untested rather than letting
+a passing Modern Standby run stand in for it.
 
 ### Gaps against a genuinely commercial Windows product
 
