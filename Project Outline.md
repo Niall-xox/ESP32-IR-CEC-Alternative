@@ -1221,8 +1221,29 @@ Check the device before installing anything:
 ```
 
 One `ON`, one ACK, then it exits — see [what `--console`
-does](#where-the-implementation-departs-from-the-plan). Install with
-`daemon\packaging\windows\install-service.ps1` from an elevated shell.
+does](#where-the-implementation-departs-from-the-plan).
+
+Then install, from an **elevated** shell. Windows client defaults to an
+execution policy of `Restricted`, so the bypass is required rather than
+optional; `-Scope Process` keeps it to that shell:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\daemon\packaging\windows\install-service.ps1 `
+    -BinaryPath .\daemon\build\Release\esp32-ir-daemon.exe
+```
+
+Plug the ESP32 in **before** installing — the script disables USB selective
+suspend on the device instance, which it can only do for a device that is
+present. Replug once afterwards for that to take effect. Then follow the log:
+
+```powershell
+Get-Content C:\ProgramData\ESP32IRRemote\daemon.log -Wait -Tail 30 -Encoding UTF8
+```
+
+`-Encoding UTF8` is needed under Windows PowerShell 5.1, which otherwise
+assumes the ANSI code page and mangles every em-dash. PowerShell 7 defaults to
+UTF-8 and does not need it.
 
 hidapi comes from vcpkg via `find_package(hidapi CONFIG)`. PkgConfig is not used
 here — it is guarded behind the Linux branch. The vcpkg target is

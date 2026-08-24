@@ -6,11 +6,25 @@
 # has to do more — upgrade in place, stop the service before replacing the
 # binary, and remove its directories on uninstall.
 #
-# Run from an elevated PowerShell:
+# Run from an elevated PowerShell. Windows client defaults to an execution
+# policy of Restricted, under which no .ps1 runs at all, so the bypass is not
+# optional — and -Scope Process confines it to that one shell rather than
+# changing the machine:
+#
+#   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 #   .\install-service.ps1 -BinaryPath C:\path\to\esp32-ir-daemon.exe
+#
+# Or without touching policy at all, from an elevated prompt:
+#
+#   powershell -ExecutionPolicy Bypass -File .\install-service.ps1 `
+#              -BinaryPath C:\path\to\esp32-ir-daemon.exe
 #
 # Uninstall:
 #   .\install-service.ps1 -Uninstall
+#
+# That this needs a policy bypass at all is part of why the brief lists an MSI
+# as the real answer: an installer a user has to disarm the shell to run is not
+# something to hand to anybody else.
 
 [CmdletBinding()]
 param(
