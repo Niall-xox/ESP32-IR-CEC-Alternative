@@ -52,16 +52,38 @@ if (-not (Test-Path $BinaryPath)) { throw "No binary at $BinaryPath" }
 # under a low-privilege account is answerable in minutes with a working binary
 # and not at all without one.
 #
-# binPath= needs the quoting below: sc.exe parses its own argument, so a path
-# with spaces has to arrive already quoted.
-sc.exe create $ServiceName `
-    binPath= "`"$BinaryPath`"" `
-    DisplayName= "ESP32 IR Remote" `
-    start= auto `
-    obj= LocalSystem | Out-Null
+# New-Service rather than `sc.exe create`.
+#
+# sc.exe parses its own command tail rather than using CommandLineToArgvW, so
+# binPath= has to arrive already quoted when the path contains a space — and
+# getting a quoted string through PowerShell's native-argument handling
+# intact is unreliable enough that it is not worth relying on for the one
+# argument whose corruption produces a service that installs cleanly and then
+# fails to start with a misleading error.
+#
+# New-Service takes the path as a real parameter. The embedded quotes below are
+# deliberate and are what Windows stores: an unquoted service path with a space
+# is the classic unquoted-service-path weakness, where Windows would try
+# C:\Program.exe before the real target.
+$binaryPathName = '"' + $BinaryPath + '"'
 
-sc.exe description $ServiceName `
-    "Mirrors PC power state to a TV over IR, as a CEC alternative." | Out-Null
+New-Service -Name $ServiceName `
+            -BinaryPathName $binaryPathName `
+            -DisplayName "ESP32 IR Remote" `
+            -Description "Mirrors PC power state to a TV over IR, as a CEC alternative." `
+            -StartupType Automatic | Out-Null
+
+# LocalSystem is New-Service's default account, which is what the brief calls
+# for now; the move to LocalService comes once the daemon is known to work,
+# mirroring Linux, which ran as root until it did and was then moved to the
+# esp32ir account. Whether hidapi's CreateFile open succeeds under a
+# low-privilege account is answerable in minutes with a working binary and not
+# at all without one.
+#
+# Automatic rather than delayed-auto. A delayed start would postpone the service
+# by up to two minutes, and the first thing it does is read the display state
+# and assert the TV to match — so a delayed start is a delayed TV, on exactly
+# the boot the feature exists for.
 
 # --- Recovery ---------------------------------------------------------------
 #
