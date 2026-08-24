@@ -122,9 +122,42 @@ payload layout:
 - Communication is daemon-initiated only. The ESP32 never sends unsolicited
   reports.
 
-**Firmware and daemon must be updated together.** A daemon speaking the
-sequenced protocol to older firmware sees every reply as unmatched and logs
-`stale reply, or firmware too old for the sequenced protocol`.
+### Version lockstep is deliberate
+
+**Firmware and daemon must be updated together**, and the protocol carries no
+compatibility path for a mismatched pair. This is a decision, not an oversight —
+please do not "fix" it without reading the rest of this section.
+
+Both halves ship together and the project is pre-release, so there is no
+installed base to strand. Carrying fallbacks for versions nobody is running
+would be machinery earning nothing, and it has a real cost beyond the code:
+a compatibility path makes "the reply could not be correlated" into a silent,
+accepted state. That is the same category of defect the sequence byte exists to
+eliminate — a weaker guarantee that still reports success. Lockstep keeps the
+guarantee unconditional, which is both easier to reason about and easier to keep
+true.
+
+A mismatch is loud rather than mysterious. The daemon logs:
+
+```
+[transport] Discarding unmatched reply (seq 79, expected 3) — stale reply,
+            or firmware too old for the sequenced protocol
+[transport] No response received for command: ON
+```
+
+That names the cause directly, which is the genuinely useful part of
+compatibility — knowing *why* it stopped — at no cost. Reflash and it is fixed.
+
+**What would change the calculus:** the daemon updating independently in the
+field. It installs from a package and updates whenever the distribution ships
+one; the firmware is flashed by hand over USB and in practice hardly ever is.
+Once there are users who upgrade one without the other, a flag day stops being
+acceptable and the wire format needs an additive path — new fields placed where
+an older peer skips them, behind a string terminator or a field it already
+ignores, with a reserved value meaning "absent".
+
+**Trigger to revisit:** the first packaged release that reaches someone else.
+Not before.
 
 ### Timing budget
 
@@ -728,7 +761,7 @@ Two ways out, neither done:
 | `onNotFound` serves any file on LittleFS | `/profiles.json` and `/settings.json` are readable by anyone on the AP. Harmless today; a real leak the moment anything sensitive is stored. Fix with a whitelist or a `/www` prefix. |
 | POST body size is unbounded | `server.arg("plain")` buffers the whole request before any handler runs, so the 32-profile cap bounds the *list*, not the allocation preceding it. Bounded in practice by the AP password and by ArduinoJson returning `NoMemory` cleanly. A real fix needs a custom body handler. |
 | No firmware watchdog | Nothing feeds a task WDT on a device meant to sit powered continuously. A hung loop stays hung until it is unplugged. |
-| No protocol version handshake | A mismatch is now *detected* and logged distinctly, but not negotiated. Cheap to add now, expensive once units ship. |
+| No protocol version handshake | Deliberate while pre-release — see [Version lockstep is deliberate](#version-lockstep-is-deliberate). A mismatch is detected and logged distinctly, but not negotiated. Revisit at the first packaged release that reaches someone else. |
 
 ### Windows
 
