@@ -15,6 +15,7 @@ Not user documentation — that comes later, separately.
 - [Communication protocol](#communication-protocol)
 - [Firmware](#firmware) — [profiles](#manufacturer-profiles) · [button & display](#button--display-behaviour) · [storage](#storage-littlefs) · [web UI](#web-ui) · [source map](#firmware-source-map)
 - [Daemon](#daemon) — [power events](#power-event-detection-linux) · [cross-platform](#cross-platform-design) · [Windows](#windows-status) · [source map](#daemon-source-map)
+- [Windows — in progress](#windows--in-progress) ← **current focus**
 - [Invariants](#invariants)
 - [Building](#building) — [firmware](#firmware-build) · [Linux](#daemon--linux) · [NixOS](#nixos) · [Windows](#windows) · [packaging](#packaging--ci) · [sdbus-c++](#the-sdbus-c-constraint)
 - [Known issues and deferred work](#known-issues-and-deferred-work)
@@ -435,10 +436,16 @@ so.
 
 ### Windows status
 
-Incomplete. The interface boundary is right and the transport is shared, so a
-robust implementation is available later without touching anything else — but
-three things are outstanding, all contained inside `WindowsPowerMonitor.cpp`.
-See [Known issues](#known-issues-and-deferred-work).
+**Never run.** `WindowsPowerMonitor.*` was written to prove the `IPowerMonitor`
+boundary held while work continued on Linux, not as a working implementation. It
+has never been compiled or executed on Windows, and it predates both fix 1
+(`send()` returning `bool`) and the sequenced protocol, so it is stale as well as
+untested.
+
+The boundary did its job: `ITransport`, `IPowerMonitor` and `HIDTransport` carry
+no platform conditionals at all. But "no changes outside `WindowsPowerMonitor`"
+turned out to be wrong — see [Windows — in progress](#windows--in-progress) for
+the full plan.
 
 ### Daemon source map
 
@@ -468,6 +475,128 @@ daemon/
 | `esp32-ir-remote.service.in` | Starts after `dbus.socket` and logind. Runs unprivileged as `esp32ir` with sandboxing. CMake substitutes the binary path so the unit is correct under both `/usr/local` and `/usr`. |
 | `99-esp32-ir-remote.rules` | Grants the `esp32ir` group the device's hidraw node. Without it `/dev/hidraw*` is root-only and the daemon cannot run unprivileged. |
 | `HIDTransport.h/.cpp` | Drains stale reports before each write; discards replies carrying another sequence. Reopens automatically after wake or replug. Single-threaded, no background polling. |
+
+---
+
+## Windows — in progress
+
+The current focus. Everything below is planned, not done. Nothing here has been
+compiled or run on Windows; a machine to test on became available 2026-08-24.
+
+### Where it stands
+
+`WindowsPowerMonitor.*` exists but was written to prove the `IPowerMonitor`
+boundary held, not to work. It has never been built or executed. It also
+predates fix 1 and the sequenced protocol, so the Windows build is stale on top
+of untested.
+
+An earlier version of this brief claimed Windows was "confirmed working". That
+was a typo and is not true — recorded here so the claim does not resurface.
+
+### What needs no work at all
+
+The transport layer is genuinely shared. `ITransport`, `IPowerMonitor` and
+`HIDTransport` contain **zero** platform conditionals, hidapi covers the Win32
+HID backend, and `CMakeLists.txt` already resolves it through vcpkg. That was
+the point of the abstraction and it held.
+
+### The architectural difference — accepted, not solved
+
+Windows has no equivalent of a logind delay inhibitor for **sleep**. The ability
+to veto a suspend (`PBT_APMQUERYSUSPEND`) was removed after XP.
+`PBT_APMSUSPEND` is a *notification*: the machine suspends roughly two seconds
+later whether anything has finished or not. That figure is Microsoft's guidance,
+not a contract — measure it on real hardware before trusting it.
+
+| Event | Linux | Windows |
+|---|---|---|
+| Sleep | delay inhibitor, 5s guaranteed | ~2s grace, **best-effort** |
+| Wake | no guarantee needed — machine is up | same |
+| Shutdown | delay inhibitor, 5s | `SERVICE_ACCEPT_PRESHUTDOWN`, minutes — **better than Linux** |
+| Boot | no guarantee needed | same |
+
+Only sleep degrades, and only from "guaranteed" to "almost always". The measured
+IR round trip is well under a second, so the grace period is ample in the healthy
+case. This is a documented concession, not a bug to fix.
+
+The ACK still matters on Windows sleep even though nothing can be done with it:
+it is the only evidence the IR actually fired, on the platform with no console.
+Dropping to fire-and-forget would reintroduce exactly the "reports success
+regardless" failure that fixes 1, 12, 13 and 21 all addressed.
+
+### Required changes
+
+**`WindowsPowerMonitor.cpp` — rewrite rather than edit.** The Win32 boilerplate
+(dispatch table, `RegisterServiceCtrlHandlerExW`, `SERVICE_STATUS` setup, the
+global-instance routing) is correct and should be kept close to verbatim. The
+logic and every comment get replaced, because the comments assert things that
+are false and it is the mental model, not the syntax, that produced the bugs.
+
+| | Change |
+|---|---|
+| Remove | The blocking-in-handler model. |
+| Remove | Comments claiming the handler "achieves the same guarantee as the Linux inhibitor lock" and that "the OS waits for the handler to return before suspending". Both untrue. |
+| Remove | The local `stopEvent` that nothing ever signals, so the process lingers holding the HID device open and an immediate restart cannot find the ESP32. |
+| Add | `PBT_APMRESUMEAUTOMATIC` alongside `PBT_APMRESUMESUSPEND`, plus a dedup flag. Windows sends AUTOMATIC on *every* resume and adds SUSPEND only for user-initiated ones, so Wake-on-LAN and scheduled wakes currently leave the TV off. |
+| Add | Stop event as a member, signalled from `SERVICE_CONTROL_STOP`. |
+| Add | `SERVICE_PRESHUTDOWN_INFO` to set the preshutdown timeout explicitly rather than inheriting the default. |
+| Change | Worker-thread model: the handler signals and returns promptly, reporting `SERVICE_*_PENDING` with advancing checkpoints while the work happens. Blocking inside the handler is against the documented contract. |
+
+**`WindowsPowerMonitor.h`** — structurally fine, same class and overrides. Needs
+the new members (stop event handle, dedup flag, worker) and its doc comment
+rewritten; it carries the same false parity claim.
+
+**`daemon/src/main.cpp`** — two things, both small:
+
+| | Change |
+|---|---|
+| Add | `GetTickCount64()` branch in `systemJustBooted()`. Currently `#ifdef __linux__` reads `/proc/uptime` and Windows falls through to `return true`, so the TV switches on for every service restart. |
+| Change | Logging destination. A Windows service has no console, so every `std::cout` vanishes and `std::unitbuf` does nothing. **Open decision — see below.** |
+
+**`daemon/src/HIDTransport.cpp`** — platform-specific timeouts. The current
+values are sized against logind's 5s; on a Windows suspend `ACK_TIMEOUT` alone
+would consume the whole grace period.
+
+| | Linux (unchanged, proven) | Windows (starting point) |
+|---|---|---|
+| `SEND_BUDGET` | 4000ms | ~1500ms |
+| `ACK_TIMEOUT` | 2000ms | ~500ms |
+
+Short enough to fail fast inside the window rather than block through the
+suspend. Linux keeps exactly what it has. Numbers to be confirmed by measuring
+the real grace period.
+
+**`daemon/CMakeLists.txt`** — every `install()` rule and the whole CPack block
+are inside `if(UNIX AND NOT APPLE)`. Windows has no install path at all.
+
+### Open decisions — needed before building
+
+1. **Logging destination.** Event Log, a log file, or redirecting stdout to a
+   file at service start so every existing `std::cout` keeps working unchanged.
+   This shapes everything else and is the only item touching shared code.
+2. **Service account.** LocalSystem is the easy default. Linux went from root to
+   an unprivileged user during hardening; the same question applies here, though
+   Windows needs no udev equivalent for HID access.
+3. **Install method.** Documented `sc create` sequence, or an MSI.
+
+### Risks to check on the real machine
+
+- **Thread safety.** `HIDTransport` has no locking and is documented
+  single-threaded on the assumption of strict request/response. If the SCM can
+  deliver a resume control while a suspend send is still running, two threads
+  could enter `hid_write` at once. The sequence byte prevents crediting the
+  wrong ACK; it does nothing about concurrent access. Keeping the Windows budget
+  short reduces the window but does not close it.
+- **The ~2s grace period** is guidance, not a contract. Measure it.
+- **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
+  that works under whichever account is chosen.
+
+### Verification plan
+
+Mirror what was done on Linux, since that is what "up to standard" means here:
+sleep, wake (both user-initiated *and* automatic — the case currently broken),
+shutdown, boot, service restart not sending ON, unconfigured profile answering
+ERR, and graceful behaviour with the ESP32 unplugged.
 
 ---
 
@@ -777,17 +906,10 @@ Two ways out, neither done:
 
 ### Windows implementation
 
-All three are contained inside `WindowsPowerMonitor.cpp` and need a Windows
-machine to verify.
-
-| Issue | Notes |
-|---|---|
-| Automatic wake leaves the TV off | Only `PBT_APMRESUMESUSPEND` is handled. Windows sends `PBT_APMRESUMEAUTOMATIC` on *every* resume and adds `RESUMESUSPEND` only for user-initiated ones, so Wake-on-LAN and scheduled wakes are missed. Needs both events plus a dedup flag. |
-| Stop event never signalled | `serviceMain` waits on an event nothing sets, so the process lingers holding the HID device open — an immediate service restart then fails to find the ESP32. |
-| Control handler blocks | Works, but against the documented contract, which wants a prompt return and a worker thread. `SERVICE_ACCEPT_PRESHUTDOWN` also needs its timeout set explicitly. |
-
-The daemon needs rebuilding on Windows — `ITransport` and `HIDTransport` have
-both changed — and the firmware it talks to must speak the sequenced protocol.
+Not listed here. The Windows daemon has never been built or run, so its defects
+are a work plan rather than a backlog — they live in
+[Windows — in progress](#windows--in-progress), together with the changes needed
+outside `WindowsPowerMonitor.*` and the open decisions that block starting.
 
 ### Process
 
