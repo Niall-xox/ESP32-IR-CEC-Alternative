@@ -774,7 +774,7 @@ Two ways out, neither done:
 | Cancelled shutdown is not handled | `PrepareForShutdown(false)` does nothing, so after a *cancelled* scheduled shutdown the delay inhibitor is not re-taken and the next sleep or shutdown goes undelayed. Bounded to that one event — the wake path re-takes unconditionally, so a sleep/wake cycle restores the lock. Deliberate, and narrower than it sounds: reaching the state at all needs the cancel to land inside the sub-second window between the shutdown beginning and the daemon releasing its lock. Cancelling during the scheduled wait beforehand does nothing, because no signal has fired yet. Judged not worth the code. |
 | No protocol version handshake | Deliberate while pre-release — see [Version lockstep is deliberate](#version-lockstep-is-deliberate). A mismatch is detected and logged distinctly, but not negotiated. Revisit at the first packaged release that reaches someone else. |
 
-### Windows
+### Windows implementation
 
 All three are contained inside `WindowsPowerMonitor.cpp` and need a Windows
 machine to verify.
@@ -795,7 +795,6 @@ both changed — and the firmware it talks to must speak the sequenced protocol.
 | CI does not build on ordinary commits | `packages.yml` runs on `v*` tags and manual dispatch only, and never builds the firmware. A broken tree is discovered at release time. |
 | No release guard | Nothing stops a `v*` tag publishing packages while the VID/PID are still placeholders. |
 
-cat > /tmp/newsec.md <<'MD'
 ### Verified on hardware — second pass
 
 Flashed 2026-08-24 (firmware and filesystem both written and hash-verified), and
