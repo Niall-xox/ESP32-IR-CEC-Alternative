@@ -49,15 +49,16 @@ config mode and the web UI. Deployed on NixOS via the flake module and confirmed
 running as an unprivileged service.
 
 **Second hardening pass — verified on hardware 2026-08-24.** The sequenced
-protocol, the uptime gate and the full sleep/wake/shutdown/boot cycle have all
-been exercised against the real device and daemon. Five items remain untested,
-none of them on the main power-sync path — see
+protocol, the uptime gate, the unconfigured-profile guard and the full
+sleep/wake/shutdown/boot cycle have all been exercised against the real device
+and daemon. Two items remain untested, neither on the power-sync path — see
 [Still unverified on hardware](#still-unverified-on-hardware).
 
-**Two things block any public release:**
+**Three things block any public release:**
 
 1. Registered VID/PID — currently placeholder `1234:5678`.
 2. Confirmed discrete IR codes for Samsung, Sony, TCL and Hisense.
+3. A LICENSE and a README — both packages already declare MIT.
 
 Verification detail and the full outstanding list are in
 [Known issues and deferred work](#known-issues-and-deferred-work).
@@ -810,17 +811,25 @@ exercised against the real daemon on NixOS:
 | Shutdown | `[event] Shutting down` → `OFF sent and ACK received` → `Lock released`, *then* systemd stopped the unit — the inhibitor held the poweroff off until the ESP32 confirmed |
 | Boot | `ON sent and ACK received (startup)` on a real boot |
 | Uptime gate | `ON skipped — service restarted on an already-running system` on `systemctl restart`, and the ON above on a genuine boot — proven both ways |
+| Unconfigured profile guard | Samsung selected (codes still `0x0`): OLED showed `Not Configured` and nothing was transmitted, rather than a meaningless frame answered with `ACK` |
 
 ### Still unverified on hardware
 
-1. Select Samsung (still `0x0`); OLED should show `Not Configured` and the
-   daemon should log `ERR`, not an ACK. Needs a power event to trigger a command.
-2. Boot with `display_always_on` enabled; status screen should be up from boot
+1. Boot with `display_always_on` enabled; status screen should be up from boot
    rather than after the first press.
-3. Factory reset and profile deletion through the web UI.
-4. Corrupt `/profiles.json` deliberately; confirm defaults are restored rather
-   than a reboot loop. The awkward one — no API writes arbitrary files, so it
-   means flashing a deliberately corrupt LittleFS image.
+2. Factory reset and profile deletion through the web UI.
+
+### Accepted untested
+
+**Corrupt `/profiles.json` recovery.** The path exists — `begin()` rewrites the
+defaults when a load yields no profiles, and `getActive()` falls back to a
+built-in profile regardless — but exercising it means building and flashing a
+deliberately corrupt LittleFS image, since no API writes arbitrary files.
+
+Judged not worth the effort: storage corruption is rare, atomic length-checked
+writes are what made it rare, and the recovery from a device that did get stuck
+is a reflash that takes under a minute. Revisit only if it is ever seen in the
+field.
 
 ---
 
