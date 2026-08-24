@@ -48,10 +48,11 @@ release, multi-manufacturer profiles on LittleFS, the button, the OLED, WiFi
 config mode and the web UI. Deployed on NixOS via the flake module and confirmed
 running as an unprivileged service.
 
-**Compile-verified, hardware verification outstanding:** the second hardening
-pass (see [History](#history)). Both halves build with zero warnings, but the
-sequenced protocol, the boot display fix, the uptime gate and the `0x0` guard
-have not yet been exercised on the device.
+**Second hardening pass — verified on hardware 2026-08-24.** The sequenced
+protocol, the uptime gate and the full sleep/wake/shutdown/boot cycle have all
+been exercised against the real device and daemon. Five items remain untested,
+none of them on the main power-sync path — see
+[Still unverified on hardware](#still-unverified-on-hardware).
 
 **Two things block any public release:**
 
@@ -795,23 +796,44 @@ both changed — and the firmware it talks to must speak the sequenced protocol.
 | CI does not build on ordinary commits | `packages.yml` runs on `v*` tags and manual dispatch only, and never builds the firmware. A broken tree is discovered at release time. |
 | No release guard | Nothing stops a `v*` tag publishing packages while the VID/PID are still placeholders. |
 
-### Unverified on hardware
+cat > /tmp/newsec.md <<'MD'
+### Verified on hardware — second pass
 
-The second hardening pass is compile-verified only:
+Flashed 2026-08-24 (firmware and filesystem both written and hash-verified), and
+exercised against the real daemon on NixOS:
 
-1. Sleep / wake / shutdown firing IR — needs a real suspend cycle and a reboot.
-2. Corrupt `/profiles.json` deliberately; confirm defaults are restored rather
-   than a reboot loop.
-3. Factory reset and profile deletion through the web UI.
-4. The sequenced protocol end to end — daemon and firmware must be flashed and
-   rebuilt **together**. Confirm a normal `ON`/`OFF` still ACKs first.
-5. Reboot with `display_always_on` enabled; status screen should be up from boot.
-6. `systemctl restart` on a long-running machine should log `ON skipped`; a real
-   reboot should still log `ON sent and ACK received (startup)`.
-7. Select Samsung (still `0x0`); OLED should show `Not Configured` and the daemon
-   should log a failure, not an ACK.
-8. `shutdown -h +1` then `shutdown -c`; expect `[event] Shutdown cancelled`
-   followed by `[inhibitor] Lock acquired`.
+| Path | Evidence |
+|---|---|
+| udev rule on hotplug | node came up `root:esp32ir` `0660` automatically after a power cycle |
+| Device retry at boot | `ESP32 not found at startup — will retry when needed` → `HID device opened` 2s later |
+| Sequenced protocol | every `ON`/`OFF` ACKed with correlation active, both halves current |
+| Sleep | `[event] Going to sleep` → `OFF sent and ACK received` → `Lock released` |
+| Wake | `[event] Woke up` → `ON sent and ACK received` → `Lock acquired` |
+| Shutdown | `[event] Shutting down` → `OFF sent and ACK received` → `Lock released`, *then* systemd stopped the unit — the inhibitor held the poweroff off until the ESP32 confirmed |
+| Boot | `ON sent and ACK received (startup)` on a real boot |
+| Uptime gate | `ON skipped — service restarted on an already-running system` on `systemctl restart`, and the ON above on a genuine boot — proven both ways |
+
+### Still unverified on hardware
+
+1. Cancelled shutdown — `[event] Shutdown cancelled` → `[inhibitor] Lock acquired`.
+   Harder to trigger than it looks: logind proceeds as soon as *all* delay
+   inhibitors release, so the real window is a fraction of a second, not
+   `InhibitDelayMaxSec`. That ceiling only applies if something refuses to
+   release. Hold one deliberately to widen it:
+   ```
+   systemd-inhibit --what=shutdown --mode=delay --who=widen --why=widen sleep 90 &
+   sudo bash -c 'shutdown -h +1; sleep 62; shutdown -c'
+   ```
+   Cancelling before the shutdown actually begins proves nothing — the signal
+   has not fired yet, so neither branch runs.
+2. Select Samsung (still `0x0`); OLED should show `Not Configured` and the
+   daemon should log `ERR`, not an ACK. Needs a power event to trigger a command.
+3. Boot with `display_always_on` enabled; status screen should be up from boot
+   rather than after the first press.
+4. Factory reset and profile deletion through the web UI.
+5. Corrupt `/profiles.json` deliberately; confirm defaults are restored rather
+   than a reboot loop. The awkward one — no API writes arbitrary files, so it
+   means flashing a deliberately corrupt LittleFS image.
 
 ---
 
