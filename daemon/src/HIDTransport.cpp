@@ -34,6 +34,17 @@ static constexpr auto OPEN_POLL = std::chrono::milliseconds(100);
 // Bounds the drain loop so a device streaming reports cannot hold us there.
 static constexpr int MAX_DRAIN_REPORTS = 64;
 
+// A write is retried until the budget runs out, so this cap is a backstop
+// against a failure mode that returns instantly — the deadline is the real
+// limit, but only if every attempt costs something. On Windows a failing
+// write already costs about a second inside hidapi.
+static constexpr int MAX_WRITE_ATTEMPTS = 8;
+
+// Between a failed write and the reopen that follows it. Stops an instantly
+// failing write from spinning through the whole budget at full tilt, and gives
+// a device that is re-enumerating somewhere to be.
+static constexpr auto WRITE_RETRY_DELAY = std::chrono::milliseconds(150);
+
 // The USB product string the firmware advertises, used to tell our device from
 // anything else answering to the same VID/PID. Not a substitute for a
 // registered pair — a string is no more unique than the numbers are — but it
@@ -245,24 +256,44 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
     txBuf[1] = seq;
     std::memcpy(txBuf + 2, cmd.c_str(), std::min(cmd.size(), REPORT_SIZE - 2));
 
-    if (hid_write(dev_, txBuf, sizeof(txBuf)) < 0) {
+    // Write, and on failure reopen and try again for as long as the budget
+    // allows rather than giving up after a single retry.
+    //
+    // The device re-enumerates itself after a USB suspend — see the recovery in
+    // the firmware — and that takes around a second, during which it is simply
+    // absent. One retry lands inside that window and reports a failure for a
+    // device that was about to be fine. The budget is the honest limit on how
+    // long to keep trying, and it is already the limit on everything else here.
+    bool written = false;
+    for (int attempt = 1; attempt <= MAX_WRITE_ATTEMPTS; ++attempt) {
+        if (hid_write(dev_, txBuf, sizeof(txBuf)) >= 0) {
+            written = true;
+            if (attempt > 1) {
+                std::cout << "[transport] Write succeeded on attempt " << attempt << "\n";
+            }
+            break;
+        }
+
         // Report what the backend said. "Write failed" alone cannot distinguish
-        // a device unplugged mid-command from a handle opened onto something
-        // that is not the ESP32 at all, and those want opposite responses.
-        std::cerr << "[transport] Write failed (" << narrow(hid_error(dev_))
-                  << ") — reopening device\n";
-        logReportDescriptor();
+        // a device unplugged mid-command from one whose endpoint has stopped
+        // being serviced, and those look identical until the error is named.
+        std::cerr << "[transport] Write failed on attempt " << attempt << " ("
+                  << narrow(hid_error(dev_)) << ")\n";
+
+        // Once only. It is the same descriptor on every attempt, and it is
+        // long.
+        if (attempt == 1) logReportDescriptor();
+
         closeDevice();
-        if (!ensureOpen(deadline)) {
-            std::cerr << "[transport] ESP32 not found after reopen — skipping: " << cmd << "\n";
-            return false;
-        }
-        if (hid_write(dev_, txBuf, sizeof(txBuf)) < 0) {
-            std::cerr << "[transport] Write failed after reopen ("
-                      << narrow(hid_error(dev_)) << ") — skipping: " << cmd << "\n";
-            closeDevice();
-            return false;
-        }
+        if (Clock::now() + WRITE_RETRY_DELAY >= deadline) break;
+        std::this_thread::sleep_for(WRITE_RETRY_DELAY);
+        if (!ensureOpen(deadline)) break;
+    }
+
+    if (!written) {
+        std::cerr << "[transport] Giving up on command within budget: " << cmd << "\n";
+        closeDevice();
+        return false;
     }
 
     return awaitAck(seq, cmd, deadline);

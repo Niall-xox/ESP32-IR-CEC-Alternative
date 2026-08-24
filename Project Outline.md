@@ -205,7 +205,7 @@ These must match in **four** places:
 
 The fourth is newer than the rest: the Windows installer needs the pair to find
 the device's registry key and disable USB selective suspend on it. See
-[USB selective suspend](#usb-selective-suspend--a-firmware-defect-worked-around-on-the-host).
+[USB selective suspend](#usb-suspend--the-defect-the-windows-build-found).
 
 For open-source release, a free registered pair is available from
 [pid.codes](https://pid.codes). Commercial release needs a USB-IF VID.
@@ -872,25 +872,31 @@ carrying an older value. Correct whichever way the clock behaves.
   between display-off and the Desktop Activity Moderator throttling it.
 - **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
   that works under whichever account is chosen.
-- **USB across standby — now the largest open risk, and no longer expected to
-  be benign.** The device is known not to resume from *idle* selective suspend
-  (see [above](#usb-selective-suspend--a-firmware-defect-worked-around-on-the-host)),
-  and entering Modern Standby suspends the bus whatever `SelectiveSuspendEnabled`
-  says. If the same failure occurs there, the wake `ON` fails after every
-  standby — which is this device's main job on a laptop. Test by leaving the
-  service running across a real standby cycle; a `WaitForSingleObject` timeout
-  in the log on resume is the signature.
+- **USB across standby — the largest open risk.** The firmware now
+  re-enumerates itself after a suspend
+  (see [above](#usb-suspend--the-defect-the-windows-build-found)), which is
+  proven to be the right response to *idle* selective suspend. Modern Standby
+  suspends the bus regardless of any registry setting, and whether the same
+  recovery carries across it is untested. If it does not, the wake `ON` fails
+  after every standby — this device's main job on a laptop.
 
-  If it does recur, the daemon needs a recovery path rather than another host
-  setting. Windows can force an electrical re-enumeration in software — a
-  replug without the hands — which is what a commercial product does with a
-  device in this state. Fixing the firmware's suspend handling is better still,
-  and not exclusive.
+  Test by leaving the service running across a real standby cycle. Three
+  outcomes to tell apart in the log: `[usb] Resumed from suspend` on the serial
+  console with the ON succeeding is the fix working; a `WaitForSingleObject`
+  timeout that then recovers on a retry is the fix working slowly, and the
+  budget wants revisiting; a timeout that exhausts the budget means the resume
+  event never arrived and the firmware never knew to recover.
 
-### USB selective suspend — a firmware defect, worked around on the host
+  That last case is the one with no fix in hand. The fallback would be the
+  daemon forcing re-enumeration from the host with the Windows configuration
+  manager, which works but is Windows-only and leaves Linux with the same
+  defect unaddressed.
+
+### USB suspend — the defect the Windows build found
 
 **Found by running the daemon on Windows for the first time, 2026-08-24.** The
-first real defect the Windows work uncovered, and it is in the firmware.
+first real defect the Windows work uncovered, and it is in the firmware, not
+in either daemon.
 
 Windows powers down an idle USB device when nothing holds a handle open. This
 ESP32 does not come back from it. The device NAKs its OUT endpoint
@@ -925,7 +931,33 @@ AC and DC values are separate — `powercfg /setacvalueindex` alone is a no-op
 while running on battery, which is how the first attempt at a fix appeared to
 disprove a correct hypothesis.
 
-What works is the per-instance value, which `install-service.ps1` now applies:
+#### The fix — the firmware rebuilds its USB state after a suspend
+
+The device cannot tell a wedged OUT endpoint from an idle one; both are silence.
+So rather than detecting the bad case, it stops trusting USB across a suspend
+and rebuilds it unconditionally. `tud_disconnect()` drops the D+ pullup and
+`tud_connect()` raises it — a replug nobody has to perform.
+
+A clean resume gets re-enumerated for nothing, costing about a second of
+unavailability that nothing observes. A broken one is repaired. Recovering
+blindly is cheaper than detecting, and it does not depend on having correctly
+guessed which resumes are the bad ones.
+
+Registered through `ARDUINO_USB_SUSPEND_EVENT` / `ARDUINO_USB_RESUME_EVENT`,
+and acted on in `loop()` rather than in the callback — tearing down USB from
+inside a USB event is how a deadlock gets built. Only a resume that follows an
+observed suspend counts, so resumes that never powered the bus down do not
+cause churn.
+
+The daemon side changed to match. A write now retries until the send budget
+runs out instead of giving up after a single reopen: re-enumeration takes
+around a second, and one retry lands inside that window and reports failure for
+a device that was about to be fine. The budget was already the limit on
+everything else in a send, so nothing new decides how long is too long.
+
+#### What is still worked around, and what is still open
+
+`install-service.ps1` continues to set the per-device registry values:
 
 ```
 HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_1234&PID_5678\<serial>\Device Parameters
@@ -933,15 +965,17 @@ HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_1234&PID_5678\<serial>\Device Paramet
     EnhancedPowerManagementEnabled = 0
 ```
 
-**This is a workaround, and it is worth being precise about what it does not
-cover.** The device ought to resume from suspend; that it does not is a firmware
-defect that this hides on one machine. The value is per-instance, so a different
-physical unit enumerates with a new serial and gets Windows' defaults back — the
-real answer is an INF carrying the values for the hardware ID, which arrives
-with the driver package and code signing already listed as gaps. And most
-importantly, it governs **idle** selective suspend only. Entering Modern Standby
-suspends the bus regardless of this setting, so whether the daemon survives a
-standby cycle is a separate and still-open question — see the risks below.
+This is now defence in depth rather than the fix. With the firmware recovering,
+an idle suspend is survivable; not entering one in the first place simply avoids
+re-enumeration churn on a device that is idle most of the time. It is also
+per-instance — a different physical unit enumerates with a new serial and gets
+Windows' defaults back — and the real answer for it remains an INF carrying the
+values against the hardware ID, which arrives with the driver package and code
+signing already listed as gaps.
+
+**Still unproven:** that the same recovery works across a Modern Standby cycle,
+where the bus suspends regardless of any registry setting. That is the case the
+device exists for on a laptop, and it is the next thing to test.
 
 ### What can be verified without a second machine
 

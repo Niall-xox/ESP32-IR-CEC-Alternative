@@ -30,6 +30,9 @@
 #include <ArduinoJson.h>
 #include "USB.h"
 #include "USBHID.h"
+// tud_disconnect() / tud_connect() — the software equivalent of a replug.
+// See the USB suspend recovery below for why the firmware needs them.
+#include "tusb.h"
 #include "Profiles.h"
 #include "Button.h"
 #include "Display.h"
@@ -133,6 +136,70 @@ public:
 };
 
 VendorHID hidDevice;
+
+// ---------------------------------------------------------------------------
+// USB suspend recovery
+// ---------------------------------------------------------------------------
+//
+// This device does not survive a USB suspend. When the host powers the bus
+// down — Windows selective suspend when nothing holds a handle open, or any
+// system entering sleep — the device comes back mounted but stops servicing
+// its OUT endpoint. The host's writes are NAKed indefinitely: opening the
+// device still succeeds, and every write then fails on a completion timeout.
+// It stays that way until the device is physically re-enumerated, which is
+// why the symptom presents as "works for a while, then refuses until it is
+// unplugged and plugged back in".
+//
+// Diagnosed on Windows 2026-08-24, but it is not a Windows defect. Linux hid
+// it because its daemon holds the device open continuously, so the host never
+// suspends an idle device — a difference in host behaviour, not in ours.
+// Anything that suspends the bus reaches it.
+//
+// The fix is to stop trusting the USB state across a suspend and rebuild it:
+// tud_disconnect() drops the D+ pullup and tud_connect() raises it again,
+// which is a replug the user does not have to perform. A clean resume is
+// re-enumerated unnecessarily, which costs about a second of unavailability
+// and is invisible; a broken one is repaired. Recovering unconditionally
+// beats trying to detect which happened, because the device cannot tell:
+// a wedged OUT endpoint and an idle one look identical from this side.
+//
+// The work happens in loop() rather than in the event callback. The callback
+// runs on the Arduino event task, and tearing down USB from inside a USB
+// event is how a deadlock gets built.
+volatile bool usbResumePending = false;
+volatile bool usbWasSuspended  = false;
+
+static void onUsbEvent(void* /*arg*/, esp_event_base_t /*base*/,
+                       int32_t id, void* /*data*/) {
+    switch (id) {
+    case ARDUINO_USB_SUSPEND_EVENT:
+        usbWasSuspended = true;
+        break;
+    case ARDUINO_USB_RESUME_EVENT:
+        // Only a resume that follows a suspend we actually saw. Resume is
+        // also raised in situations that never powered the bus down, and
+        // re-enumerating on those would be churn for nothing.
+        if (usbWasSuspended) {
+            usbWasSuspended  = false;
+            usbResumePending = true;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Re-enumerates if a suspend/resume cycle has been seen since the last check.
+static void serviceUsbRecovery() {
+    if (!usbResumePending) return;
+    usbResumePending = false;
+
+    Serial.println("[usb] Resumed from suspend — re-enumerating");
+
+    tud_disconnect();
+    delay(100);   // long enough for the host to register the disconnect
+    tud_connect();
+}
 
 // ---------------------------------------------------------------------------
 // IR dispatch — synchronous, blocks until the full signal is transmitted.
@@ -439,6 +506,11 @@ void setup() {
     USB.PID(DEVICE_PID);
     USB.productName("ESP32 IR Remote");
     USB.manufacturerName("ESP32-IR-CEC");
+
+    // Registered before USB.begin() so the first suspend cannot be missed.
+    USB.onEvent(ARDUINO_USB_SUSPEND_EVENT, onUsbEvent);
+    USB.onEvent(ARDUINO_USB_RESUME_EVENT, onUsbEvent);
+
     USB.begin();
     HID.begin();
 }
@@ -449,6 +521,10 @@ void setup() {
 void loop() {
     button.update();
     display.update();
+
+    // Before anything reads from USB: if the bus was suspended and resumed,
+    // the endpoint state is not to be trusted until it has been rebuilt.
+    serviceUsbRecovery();
 
     if (wifiActive) {
         server.handleClient();
