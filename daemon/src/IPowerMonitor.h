@@ -4,8 +4,8 @@
 // Abstract interface for monitoring PC power events.
 //
 // Concrete implementations:
-//   LinuxPowerMonitor   — systemd-logind over D-Bus, Phase 1
-//   WindowsPowerMonitor — Win32 Service API, Phase 2
+//   LinuxPowerMonitor   — systemd-logind over D-Bus
+//   WindowsPowerMonitor — Win32 Service API; incomplete, see the brief
 //
 // Callers register callbacks for each event then call run(), which blocks
 // and drives the underlying event loop until the process is killed.

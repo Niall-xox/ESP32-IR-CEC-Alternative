@@ -32,7 +32,7 @@ SerialTransport::~SerialTransport() {
 }
 
 bool SerialTransport::openPort() {
-    // O_WRONLY  — send-only in Phase 1; no responses expected from the ESP32
+    // O_WRONLY  — send-only; this transport expects no response from the ESP32
     // O_NOCTTY  — don't let this port become the process's controlling terminal
     // O_NDELAY  — don't block if the device isn't ready yet
     fd_ = open(port_.c_str(), O_WRONLY | O_NOCTTY | O_NDELAY);
@@ -60,7 +60,7 @@ void SerialTransport::configurePort() {
     // Raw output — no newline translation or other byte transformations
     options.c_oflag &= ~OPOST;
 
-    // Raw input (write-only in Phase 1 but set for completeness)
+    // Raw input (this transport is write-only, but set for completeness)
     options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
 
     tcsetattr(fd_, TCSANOW, &options);

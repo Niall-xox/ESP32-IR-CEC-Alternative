@@ -2,7 +2,7 @@
 #include "ITransport.h"
 #include <string>
 
-// ITransport implementation using POSIX serial over USB CDC (Phase 1).
+// ITransport implementation using POSIX serial over USB CDC.
 //
 // Not compiled into the daemon. Retained as the supported path for ESP32 boards
 // that cannot present as USB HID — the S3's native USB is what makes HID

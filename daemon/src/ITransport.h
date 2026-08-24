@@ -4,8 +4,8 @@
 // Abstract interface for sending commands to the ESP32.
 //
 // Concrete implementations:
-//   SerialTransport  — USB CDC Serial, Phase 1
-//   HIDTransport     — USB HID, Phase 2
+//   HIDTransport     — USB HID; the one that is compiled in
+//   SerialTransport  — USB CDC serial; archived, for boards without HID
 //
 // main.cpp only interacts through this interface so the transport
 // implementation can be swapped without touching any other code.

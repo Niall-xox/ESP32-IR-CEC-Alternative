@@ -43,10 +43,10 @@ robust and network-independent.
 
 ## Current status
 
-**Working and verified on hardware:** Phases 1–3 complete — USB HID transport
-with ACK-based inhibitor release, multi-manufacturer profiles on LittleFS, the
-button, the OLED, WiFi config mode and the web UI. Deployed on NixOS via the
-flake module and confirmed running as an unprivileged service.
+**Working and verified on hardware:** USB HID transport with ACK-based inhibitor
+release, multi-manufacturer profiles on LittleFS, the button, the OLED, WiFi
+config mode and the web UI. Deployed on NixOS via the flake module and confirmed
+running as an unprivileged service.
 
 **Compile-verified, hardware verification outstanding:** the second hardening
 pass (see [History](#history)). Both halves build with zero warnings, but the
@@ -773,8 +773,8 @@ The second hardening pass is compile-verified only:
 
 ## History
 
-Phases 1–3 built the thing: CDC serial with a fixed delay, then USB HID with
-ACK-based lock release and Windows support, then profiles, the button, WiFi
+The device was built in three stages: CDC serial with a fixed delay, then USB HID
+with ACK-based lock release and Windows support, then profiles, the button, WiFi
 config mode and the web UI.
 
 Two hardening passes followed. The first found twelve issues, and the pattern was
