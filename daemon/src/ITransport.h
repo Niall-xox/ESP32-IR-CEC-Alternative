@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <string>
 
 // Abstract interface for sending commands to the ESP32.
@@ -20,7 +21,14 @@ public:
     // missing, the write failed, the response timed out, or the device replied
     // ERR. A false return must not stop the caller from proceeding: the system
     // still has to be allowed to sleep or shut down.
-    virtual bool send(const std::string& cmd) = 0;
+    //
+    // `budget` is the wall-clock time the caller can afford to block for, which
+    // is a property of the *event* rather than of the transport: it is however
+    // long this OS will wait for us before proceeding without us. Zero means
+    // "no caller-imposed limit" and the transport applies its own default.
+    // IPowerMonitor supplies the value — see IPowerMonitor::sleepBudget().
+    virtual bool send(const std::string& cmd,
+                      std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) = 0;
 
     virtual ~ITransport() = default;
 };

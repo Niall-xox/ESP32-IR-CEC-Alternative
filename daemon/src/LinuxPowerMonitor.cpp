@@ -57,9 +57,9 @@ LinuxPowerMonitor::~LinuxPowerMonitor() {
     releaseInhibitorLock();
 }
 
-void LinuxPowerMonitor::setOnSleep(std::function<void()> cb)    { onSleep_    = std::move(cb); }
-void LinuxPowerMonitor::setOnWake(std::function<void()> cb)     { onWake_     = std::move(cb); }
-void LinuxPowerMonitor::setOnShutdown(std::function<void()> cb) { onShutdown_ = std::move(cb); }
+void LinuxPowerMonitor::setOnSleep(std::function<bool()> cb)    { onSleep_    = std::move(cb); }
+void LinuxPowerMonitor::setOnWake(std::function<bool()> cb)     { onWake_     = std::move(cb); }
+void LinuxPowerMonitor::setOnShutdown(std::function<bool()> cb) { onShutdown_ = std::move(cb); }
 
 void LinuxPowerMonitor::run() {
     connection_->enterEventLoop();
@@ -105,11 +105,11 @@ void LinuxPowerMonitor::onPrepareForSleep(bool start) {
         std::cout << "[event] Going to sleep\n";
         // Always release the inhibitor lock even if the callback fails (e.g. ESP32
         // not plugged in) — the system must not be blocked from sleeping.
-        try { if (onSleep_) onSleep_(); } catch (...) {}
+        try { if (onSleep_) (void)onSleep_(); } catch (...) {}
         releaseInhibitorLock();
     } else {
         std::cout << "[event] Woke up\n";
-        try { if (onWake_) onWake_(); } catch (...) {}
+        try { if (onWake_) (void)onWake_(); } catch (...) {}
         takeInhibitorLock();  // re-take ready for the next sleep event
     }
 }
@@ -119,7 +119,7 @@ void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
         std::cout << "[event] Shutting down\n";
         // Always release the inhibitor lock even if the callback fails — the
         // system must not be blocked from shutting down.
-        try { if (onShutdown_) onShutdown_(); } catch (...) {}
+        try { if (onShutdown_) (void)onShutdown_(); } catch (...) {}
         releaseInhibitorLock();
     }
 

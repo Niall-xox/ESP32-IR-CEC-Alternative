@@ -26,9 +26,13 @@ public:
     LinuxPowerMonitor();
     ~LinuxPowerMonitor() override;
 
-    void setOnSleep(std::function<void()> cb) override;
-    void setOnWake(std::function<void()> cb) override;
-    void setOnShutdown(std::function<void()> cb) override;
+    // The confirmation these return is deliberately ignored here: logind
+    // reports every event, and this monitor sends on each one rather than
+    // suppressing repeats, so it has no state that a failed send could
+    // corrupt. See IPowerMonitor for why the answer exists at all.
+    void setOnSleep(std::function<bool()> cb) override;
+    void setOnWake(std::function<bool()> cb) override;
+    void setOnShutdown(std::function<bool()> cb) override;
 
     // Blocks and runs the sdbus event loop until the process is killed.
     void run() override;
@@ -58,7 +62,7 @@ private:
     // Destroying the UnixFd closes the fd, which releases the lock.
     std::optional<sdbus::UnixFd> inhibitorFd_;
 
-    std::function<void()> onSleep_;
-    std::function<void()> onWake_;
-    std::function<void()> onShutdown_;
+    std::function<bool()> onSleep_;
+    std::function<bool()> onWake_;
+    std::function<bool()> onShutdown_;
 };

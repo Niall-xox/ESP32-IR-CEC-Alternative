@@ -31,7 +31,13 @@ public:
     // send budget, as ITransport requires: this runs inside a power-event
     // handler, where an exception would escape into the caller's event loop and
     // a long retry would outlive the inhibitor lock it is delaying.
-    bool send(const std::string& cmd) override;
+    //
+    // The budget parameter is accepted for the interface and ignored: this
+    // transport's own timeouts are already well inside the tightest budget any
+    // caller passes. Should that stop being true, honour it here rather than
+    // leaving the signature lying.
+    bool send(const std::string& cmd,
+              std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
 
 private:
     // Opens and configures the port. Returns true on success.

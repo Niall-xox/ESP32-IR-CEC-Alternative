@@ -66,7 +66,8 @@ void SerialTransport::configurePort() {
     tcsetattr(fd_, TCSANOW, &options);
 }
 
-bool SerialTransport::send(const std::string& cmd) {
+bool SerialTransport::send(const std::string& cmd,
+                           std::chrono::milliseconds /*budget*/) {
     const std::string msg = cmd + "\n";
     const auto deadline = std::chrono::steady_clock::now() + SEND_BUDGET;
 

@@ -80,10 +80,28 @@ add_executable(esp32-ir-daemon ${SOURCES})
 target_include_directories(esp32-ir-daemon PRIVATE src ${HIDAPI_INCLUDE_DIRS})
 
 if(WIN32)
+    # No extra libraries beyond hidapi. Everything the Windows build calls —
+    # the service API, RegisterPowerSettingNotification, the file and
+    # environment functions — resolves from the default MSVC link set. The one
+    # thing that did not was SHGetKnownFolderPath's FOLDERID constant, which is
+    # why the log path is read from the environment instead.
+    #
+    # The Win32 API surface this uses — SERVICE_ACCEPT_PRESHUTDOWN,
+    # RegisterPowerSettingNotification, HPOWERNOTIFY — is Vista and later.
+    # Naming the version rather than inheriting whatever the SDK happens to
+    # default to keeps a toolchain upgrade from silently changing what compiles.
     target_link_libraries(esp32-ir-daemon PRIVATE hidapi::winapi)
+    target_compile_definitions(esp32-ir-daemon PRIVATE
+        _WIN32_WINNT=0x0601
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX)
 else()
     target_link_libraries(esp32-ir-daemon PRIVATE PkgConfig::HIDAPI)
 endif()
+
+# The Windows monitor runs its worker on a std::thread.
+find_package(Threads REQUIRED)
+target_link_libraries(esp32-ir-daemon PRIVATE Threads::Threads)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(esp32-ir-daemon PRIVATE SDBusCpp::sdbus-c++)

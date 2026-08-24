@@ -84,8 +84,17 @@ uint8_t HIDTransport::nextSequence() {
     return seq_;
 }
 
-bool HIDTransport::send(const std::string& cmd) {
-    const TimePoint deadline = Clock::now() + SEND_BUDGET;
+bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget) {
+    // Zero means the caller has no limit of its own. Anything larger than
+    // SEND_BUDGET is clamped: a caller may tell us it has *less* time than the
+    // default, never more, because the default is what keeps this call inside
+    // logind's InhibitDelayMaxSec. Clamping rather than trusting the caller is
+    // what stops the budget invariant from depending on every call site.
+    const auto effective = (budget <= std::chrono::milliseconds::zero())
+                               ? SEND_BUDGET
+                               : std::min(budget, SEND_BUDGET);
+
+    const TimePoint deadline = Clock::now() + effective;
 
     if (!ensureOpen(deadline)) {
         std::cerr << "[transport] ESP32 not found — skipping IR command: " << cmd << "\n";
@@ -125,6 +134,10 @@ bool HIDTransport::send(const std::string& cmd) {
 }
 
 bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadline) {
+    // ACK_TIMEOUT bounds this wait on its own, and the shared deadline bounds it
+    // again. A tightened budget therefore shortens the ACK wait automatically,
+    // rather than needing a second platform-specific constant kept in step with
+    // the first by hand.
     const TimePoint ackDeadline = std::min(deadline, Clock::now() + ACK_TIMEOUT);
 
     while (true) {
