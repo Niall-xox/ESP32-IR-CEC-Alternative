@@ -121,16 +121,12 @@ void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
         // system must not be blocked from shutting down.
         try { if (onShutdown_) onShutdown_(); } catch (...) {}
         releaseInhibitorLock();
-    } else {
-        // Shutdown was cancelled (e.g. `shutdown -c` during a scheduled one)
-        // and the machine is staying up. The lock was released on the way in,
-        // so it has to be re-taken here exactly as the resume path does.
-        //
-        // Doing nothing left the daemon permanently unlocked: every later sleep
-        // and shutdown then proceeded without waiting, and the OFF raced the
-        // machine going down. Silent, permanent, and indistinguishable from
-        // working right up until the TV stayed on.
-        std::cout << "[event] Shutdown cancelled\n";
-        takeInhibitorLock();
     }
+
+    // start = false means a scheduled shutdown was cancelled.
+    // Deliberately unhandled — see "Cancelled shutdown" in the brief.
+    // The lock stays released for the rest of the process's life, so a
+    // later sleep or shutdown is not delayed. That is an accepted
+    // consequence of an edge case judged not worth the code, not an
+    // oversight.
 }

@@ -17,9 +17,8 @@
 //   2. When a sleep/shutdown signal fires, the callback runs to completion —
 //      which for HIDTransport means the ESP32 has ACKed — and the lock is then
 //      released. systemd proceeds. There is no fixed delay anywhere.
-//   3. The lock is re-acquired whenever the system stays up: after a resume,
-//      and after a cancelled shutdown. Both must re-take it, or the next event
-//      goes unblocked and the IR command races the machine powering down.
+//   3. On wake the lock is re-acquired, ready for the next sleep. A
+//      cancelled shutdown is deliberately not handled — see the brief.
 class LinuxPowerMonitor : public IPowerMonitor {
 public:
     // Connects to the system D-Bus, registers signal handlers, and acquires

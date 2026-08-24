@@ -390,12 +390,11 @@ Subscribes to `PrepareForSleep` and `PrepareForShutdown` on
 1. Acquired at construction, held continuously.
 2. On a sleep/shutdown signal the callback runs to completion — which means the
    ESP32 has ACKed — then the lock is released and systemd proceeds.
-3. Re-acquired whenever the machine stays up: after a resume
-   (`PrepareForSleep(false)`) **and** after a cancelled shutdown
-   (`PrepareForShutdown(false)`).
+3. Re-acquired on resume (`PrepareForSleep(false)`), ready for the next sleep.
 
-Both re-acquire paths matter. Missing either leaves the daemon permanently
-unlocked, so every later event proceeds without waiting.
+`PrepareForShutdown(false)` — a scheduled shutdown being cancelled — is
+deliberately not handled. See
+[Known issues](#known-issues-and-deferred-work) for why.
 
 **Startup ON is gated on uptime.** The service starting only implies a boot if
 the machine actually just booted — `Restart=on-failure`, package upgrades and
@@ -499,8 +498,7 @@ history has the incidents. Breaking one of these is how the project regresses.
 
 **Inhibitor lock**
 
-- Held whenever the machine is up. Both `PrepareForSleep(false)` and
-  `PrepareForShutdown(false)` must re-acquire.
+- Re-acquired on resume, ready for the next sleep.
 - Acquisition never throws — it runs inside D-Bus signal handlers, where an
   exception unwinds into the sdbus event loop.
 - A `false` from `send()` must never stop the system sleeping or shutting down.
@@ -773,6 +771,7 @@ Two ways out, neither done:
 | `onNotFound` serves any file on LittleFS | `/profiles.json` and `/settings.json` are readable by anyone on the AP. Harmless today; a real leak the moment anything sensitive is stored. Fix with a whitelist or a `/www` prefix. |
 | POST body size is unbounded | `server.arg("plain")` buffers the whole request before any handler runs, so the 32-profile cap bounds the *list*, not the allocation preceding it. Bounded in practice by the AP password and by ArduinoJson returning `NoMemory` cleanly. A real fix needs a custom body handler. |
 | No firmware watchdog | Nothing feeds a task WDT on a device meant to sit powered continuously. A hung loop stays hung until it is unplugged. |
+| Cancelled shutdown is not handled | `PrepareForShutdown(false)` does nothing, so after a *cancelled* scheduled shutdown the delay inhibitor stays released and later sleeps and shutdowns go undelayed until the daemon restarts. Deliberate, and narrower than it sounds: the state is only reachable by cancelling inside the sub-second window between the shutdown actually beginning and the daemon releasing its lock. During the scheduled wait beforehand no signal has fired, so a cancel there changes nothing. Judged not worth the code. |
 | No protocol version handshake | Deliberate while pre-release — see [Version lockstep is deliberate](#version-lockstep-is-deliberate). A mismatch is detected and logged distinctly, but not negotiated. Revisit at the first packaged release that reaches someone else. |
 
 ### Windows
@@ -815,23 +814,12 @@ exercised against the real daemon on NixOS:
 
 ### Still unverified on hardware
 
-1. Cancelled shutdown — `[event] Shutdown cancelled` → `[inhibitor] Lock acquired`.
-   Harder to trigger than it looks: logind proceeds as soon as *all* delay
-   inhibitors release, so the real window is a fraction of a second, not
-   `InhibitDelayMaxSec`. That ceiling only applies if something refuses to
-   release. Hold one deliberately to widen it:
-   ```
-   systemd-inhibit --what=shutdown --mode=delay --who=widen --why=widen sleep 90 &
-   sudo bash -c 'shutdown -h +1; sleep 62; shutdown -c'
-   ```
-   Cancelling before the shutdown actually begins proves nothing — the signal
-   has not fired yet, so neither branch runs.
-2. Select Samsung (still `0x0`); OLED should show `Not Configured` and the
+1. Select Samsung (still `0x0`); OLED should show `Not Configured` and the
    daemon should log `ERR`, not an ACK. Needs a power event to trigger a command.
-3. Boot with `display_always_on` enabled; status screen should be up from boot
+2. Boot with `display_always_on` enabled; status screen should be up from boot
    rather than after the first press.
-4. Factory reset and profile deletion through the web UI.
-5. Corrupt `/profiles.json` deliberately; confirm defaults are restored rather
+3. Factory reset and profile deletion through the web UI.
+4. Corrupt `/profiles.json` deliberately; confirm defaults are restored rather
    than a reboot loop. The awkward one — no API writes arbitrary files, so it
    means flashing a deliberately corrupt LittleFS image.
 
