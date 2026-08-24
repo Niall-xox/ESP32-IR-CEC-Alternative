@@ -537,7 +537,7 @@ are false and it is the mental model, not the syntax, that produced the bugs.
 | Remove | The blocking-in-handler model. |
 | Remove | Comments claiming the handler "achieves the same guarantee as the Linux inhibitor lock" and that "the OS waits for the handler to return before suspending". Both untrue. |
 | Remove | The local `stopEvent` that nothing ever signals, so the process lingers holding the HID device open and an immediate restart cannot find the ESP32. |
-| Add | `PBT_APMRESUMEAUTOMATIC` alongside `PBT_APMRESUMESUSPEND`, plus a dedup flag. Windows sends AUTOMATIC on *every* resume and adds SUSPEND only for user-initiated ones, so Wake-on-LAN and scheduled wakes currently leave the TV off. |
+| Add | Handling for `PBT_APMRESUMEAUTOMATIC`, which fires on *every* resume. Only `PBT_APMRESUMESUSPEND` is handled today, and Windows sends that one *additionally*, for user-initiated wakes only — so Wake-on-LAN and scheduled wakes currently leave the TV off. See the decisions table: AUTOMATIC alone covers every case, so no dedup flag is needed. |
 | Add | Stop event as a member, signalled from `SERVICE_CONTROL_STOP`. |
 | Add | `SERVICE_PRESHUTDOWN_INFO` to set the preshutdown timeout explicitly rather than inheriting the default. |
 | Change | Worker-thread model: the handler signals and returns promptly, reporting `SERVICE_*_PENDING` with advancing checkpoints while the work happens. Blocking inside the handler is against the documented contract. |
@@ -623,13 +623,36 @@ only alongside the rest of the consolidation, not on its own.
 End state: exactly one platform conditional in `main.cpp` — which implementations
 to build — and nothing conditional anywhere else.
 
-### Open decisions — still needed before building
+### Decisions — settled
 
-1. **Service account.** LocalSystem is the easy default. Linux went from root to
-   an unprivileged user during hardening; the same question applies here, though
-   Windows needs no udev equivalent for HID access. Unknown attached: whether
-   hidapi's `CreateFile` open works under a low-privilege account.
-2. **Install method.** Documented `sc create` sequence, or an MSI.
+| Decision | Chosen | Reasoning |
+|---|---|---|
+| `WindowsPowerMonitor.cpp` / `.h` | **Rewrite both**, keeping the Win32 boilerplate near-verbatim | The existing comments assert things that are false — that the handler "achieves the same guarantee as the Linux inhibitor lock", that "the OS waits for the handler to return before suspending". Wrong comments outlive wrong code, because they get read and believed. The dispatch table, `RegisterServiceCtrlHandlerExW` and `SERVICE_STATUS` setup are correct and get retyped as-is. |
+| Resume events | **`PBT_APMRESUMEAUTOMATIC` only** | Windows documents AUTOMATIC as firing on *every* resume; `RESUMESUSPEND` is additional, and only for user-initiated ones. Handling AUTOMATIC alone covers every case with no dedup state at all. Confirm on hardware by logging both across a user wake and a Wake-on-LAN. |
+| Service account | **LocalSystem now, LocalService once tested** | Whether hidapi's `CreateFile` open works under a low-privilege account is answerable in minutes with a working binary and not at all without one. Mirrors Linux, which ran as root until it worked and was then moved to `esp32ir`. |
+| Install | **`sc create` now, MSI at first release** | Packaging follows a working daemon, as it did on Linux. |
+| Recovery | **Restart on failure, 5s delay** | Mirrors `Restart=on-failure` / `RestartSec=5`. Set in the same `sc` sequence as the install. |
+
+### Decision — open
+
+**Threading model.** Where the send happens when a power event arrives.
+
+- **Blocking handlers with a mutex.** One mutex, no other machinery. Viable
+  because the send is bounded at ~1.5s against roughly 30s of SCM tolerance.
+  Fails *loudly* — a jam makes the service visibly unresponsive.
+- **Worker thread and queue.** The by-the-book pattern. Needs a thread, a queue,
+  a shutdown protocol, and `SERVICE_STATUS` checkpoint reporting during
+  preshutdown. Fails *quietly* — a stuck worker leaves the SCM believing all is
+  well while nothing is sent.
+
+Leaning towards blocking handlers: the worker pattern exists for services doing
+genuinely long work, and guards against a slow send that the budget already
+prevents. Its extra machinery fails only during real suspends and shutdowns,
+which is the hardest condition to test. Switching later is contained to one file.
+
+Whichever is chosen, the **mutex belongs in `WindowsPowerMonitor`, not
+`HIDTransport`**. Linux has no concurrency here — sdbus delivers on one thread —
+so locking shared code would impose Windows' problem on a platform without it.
 
 ### Risks to check on the real machine
 
