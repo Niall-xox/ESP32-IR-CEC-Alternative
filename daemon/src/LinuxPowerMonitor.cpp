@@ -123,10 +123,11 @@ void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
         releaseInhibitorLock();
     }
 
-    // start = false means a scheduled shutdown was cancelled.
-    // Deliberately unhandled — see "Cancelled shutdown" in the brief.
-    // The lock stays released for the rest of the process's life, so a
-    // later sleep or shutdown is not delayed. That is an accepted
-    // consequence of an edge case judged not worth the code, not an
-    // oversight.
+    // start = false means a scheduled shutdown was cancelled. Deliberately
+    // unhandled — see "Cancelled shutdown" in the brief.
+    //
+    // The lock is not re-taken here, so the next sleep or shutdown is not
+    // delayed. The exposure is that one event, not a permanent one: the
+    // wake path re-takes unconditionally, so a sleep/wake cycle restores
+    // it. Accepted consequence of an edge case judged not worth the code.
 }
