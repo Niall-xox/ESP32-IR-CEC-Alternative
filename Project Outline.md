@@ -194,8 +194,18 @@ The daemon finds the device by VID/PID — no port numbers or paths.
 | Product name | `ESP32 IR Remote` | Shown in system device list |
 | Manufacturer | `ESP32-IR-CEC` | Shown in system device list |
 
-These must match in three places: `firmware/src/main.cpp`, `daemon/src/main.cpp`
-and `99-esp32-ir-remote.rules` (lowercase hex, no `0x`).
+These must match in **four** places:
+
+| File | Form |
+|---|---|
+| `firmware/src/main.cpp` | `0x` hex |
+| `daemon/src/main.cpp` | `0x` hex |
+| `99-esp32-ir-remote.rules` | lowercase hex, no `0x` |
+| `packaging/windows/install-service.ps1` | hex, no `0x`, as `-VendorId` / `-ProductId` defaults |
+
+The fourth is newer than the rest: the Windows installer needs the pair to find
+the device's registry key and disable USB selective suspend on it. See
+[USB selective suspend](#usb-selective-suspend--a-firmware-defect-worked-around-on-the-host).
 
 For open-source release, a free registered pair is available from
 [pid.codes](https://pid.codes). Commercial release needs a USB-IF VID.
@@ -862,10 +872,76 @@ carrying an older value. Correct whichever way the clock behaves.
   between display-off and the Desktop Activity Moderator throttling it.
 - **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
   that works under whichever account is chosen.
-- **USB across standby.** Whether the port keeps power, and whether the handle
-  survives. The `OFF` is sent before the transition either way, and a failed
-  write reopens, so this is expected to be benign — worth confirming rather than
-  assuming.
+- **USB across standby — now the largest open risk, and no longer expected to
+  be benign.** The device is known not to resume from *idle* selective suspend
+  (see [above](#usb-selective-suspend--a-firmware-defect-worked-around-on-the-host)),
+  and entering Modern Standby suspends the bus whatever `SelectiveSuspendEnabled`
+  says. If the same failure occurs there, the wake `ON` fails after every
+  standby — which is this device's main job on a laptop. Test by leaving the
+  service running across a real standby cycle; a `WaitForSingleObject` timeout
+  in the log on resume is the signature.
+
+  If it does recur, the daemon needs a recovery path rather than another host
+  setting. Windows can force an electrical re-enumeration in software — a
+  replug without the hands — which is what a commercial product does with a
+  device in this state. Fixing the firmware's suspend handling is better still,
+  and not exclusive.
+
+### USB selective suspend — a firmware defect, worked around on the host
+
+**Found by running the daemon on Windows for the first time, 2026-08-24.** The
+first real defect the Windows work uncovered, and it is in the firmware.
+
+Windows powers down an idle USB device when nothing holds a handle open. This
+ESP32 does not come back from it. The device NAKs its OUT endpoint
+indefinitely, so `hid_open` still succeeds and every write then fails — hidapi
+issues an overlapped `WriteFile`, gets `ERROR_IO_PENDING`, waits its internal
+one second for completion, and gives up:
+
+```
+[transport] Write failed (hid_write/WaitForSingleObject:
+            (0x000003E5) Overlapped I/O operation is in progress.)
+```
+
+It stays broken until the device is physically re-enumerated, which is what
+made it look like "works for a while, then refuses until replugged". The
+presentation is worth remembering, because three plausible explanations fit it
+and all three were wrong:
+
+| Ruled out | By |
+|---|---|
+| VID/PID collision, `hid_open` taking the wrong device | `Get-PnpDevice` showing one physical unit as a USB parent and its HID child — the normal tree |
+| Firmware publishing a bad report descriptor (`USB.begin()` before `HID.begin()`) | The host's parsed descriptor dumping as the exact 34 bytes the firmware defines, Output item and all |
+| A hung `loop()`, the known missing-watchdog issue | The button and OLED continuing to work throughout a failing streak |
+
+What identified it was noticing the failure tracked **idle time** rather than
+any command — and that `hid_error()` named a completion timeout rather than a
+rejected write. Diagnostics were the whole difference; "Write failed" alone
+supported all four stories equally.
+
+**Two traps in confirming it.** The global power-scheme setting is overridden by
+a per-device value, so changing the scheme proves nothing. And on a laptop the
+AC and DC values are separate — `powercfg /setacvalueindex` alone is a no-op
+while running on battery, which is how the first attempt at a fix appeared to
+disprove a correct hypothesis.
+
+What works is the per-instance value, which `install-service.ps1` now applies:
+
+```
+HKLM\SYSTEM\CurrentControlSet\Enum\USB\VID_1234&PID_5678\<serial>\Device Parameters
+    SelectiveSuspendEnabled        = 0
+    EnhancedPowerManagementEnabled = 0
+```
+
+**This is a workaround, and it is worth being precise about what it does not
+cover.** The device ought to resume from suspend; that it does not is a firmware
+defect that this hides on one machine. The value is per-instance, so a different
+physical unit enumerates with a new serial and gets Windows' defaults back — the
+real answer is an INF carrying the values for the hardware ID, which arrives
+with the driver package and code signing already listed as gaps. And most
+importantly, it governs **idle** selective suspend only. Entering Modern Standby
+suspends the bus regardless of this setting, so whether the daemon survives a
+standby cycle is a separate and still-open question — see the risks below.
 
 ### What can be verified without a second machine
 

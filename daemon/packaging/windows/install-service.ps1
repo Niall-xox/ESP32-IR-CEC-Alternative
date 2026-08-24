@@ -16,6 +16,18 @@
 param(
     [string]$BinaryPath,
     [string]$ServiceName = "esp32-ir-remote",
+
+    # Must match DEVICE_VID / DEVICE_PID in firmware/src/main.cpp and
+    # daemon/src/main.cpp. Lowercase or uppercase hex, no 0x. This is the
+    # fourth place the pair appears — see the brief's USB device identity
+    # table, which now lists all four.
+    #
+    # Not named -Pid: $PID is a PowerShell automatic variable holding the
+    # process ID, and binding a parameter to it fails in ways that are not
+    # obvious from the error.
+    [string]$VendorId  = "1234",
+    [string]$ProductId = "5678",
+
     [switch]$Uninstall
 )
 
@@ -109,6 +121,68 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/rest
 $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 New-ItemProperty -Path $key -Name "PreshutdownTimeout" `
                  -Value 60000 -PropertyType DWord -Force | Out-Null
+
+# --- USB selective suspend --------------------------------------------------
+#
+# Windows powers down an idle USB device when nothing holds a handle open, and
+# this ESP32 does not come back from it: the device NAKs its OUT endpoint
+# forever, so every write fails with a WaitForSingleObject timeout while
+# hid_open still succeeds. It stays that way until the device is physically
+# re-enumerated, which is why the symptom looks like "works for a while, then
+# refuses until replugged".
+#
+# Diagnosed 2026-08-24 on the Modern Standby test laptop. The global power
+# scheme setting was not enough — a per-device value overrides it, and on a
+# laptop the AC and DC values are separate, so a scheme change made on battery
+# power silently does nothing.
+#
+# This is a workaround for a firmware defect, not a fix. The device ought to
+# resume. It is also per-instance: a different physical unit enumerates with a
+# new serial and gets Windows' defaults again. The real answer is an INF that
+# carries these values for the hardware ID, which arrives with the driver
+# package and code signing already listed as gaps.
+function Disable-UsbSelectiveSuspend {
+    param([string]$Vid, [string]$Pid)
+
+    $hardwareKey = "VID_$Vid&PID_$Pid"
+    $enumRoot    = "HKLM:\SYSTEM\CurrentControlSet\Enum\USB"
+
+    # Collected first, then written. A counter incremented inside a piped
+    # ForEach-Object block lands in the wrong scope, and the function would
+    # report zero while having done the work — a lie in the one message
+    # telling the operator whether the fix was applied.
+    $paramKeys = @()
+    foreach ($hw in @(Get-ChildItem $enumRoot -ErrorAction SilentlyContinue |
+                      Where-Object { $_.PSChildName -like "$hardwareKey*" })) {
+        foreach ($instance in @(Get-ChildItem $hw.PSPath -ErrorAction SilentlyContinue)) {
+            $params = Join-Path $instance.PSPath "Device Parameters"
+            if (Test-Path $params) { $paramKeys += $params }
+        }
+    }
+
+    foreach ($params in $paramKeys) {
+        New-ItemProperty -Path $params -Name "SelectiveSuspendEnabled" `
+                         -Value 0 -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $params -Name "EnhancedPowerManagementEnabled" `
+                         -Value 0 -PropertyType DWord -Force | Out-Null
+    }
+
+    return $paramKeys.Count
+}
+
+$suspendApplied = Disable-UsbSelectiveSuspend -Vid $VendorId -Pid $ProductId
+if ($suspendApplied -gt 0) {
+    Write-Host "Disabled USB selective suspend on $suspendApplied device instance(s)."
+    Write-Host "Unplug and replug the ESP32 for that to take effect."
+} else {
+    # Not fatal: the device simply is not plugged in. Saying so is the point —
+    # a silent no-op here reappears later as the intermittent write failure,
+    # with nothing connecting the two.
+    Write-Warning ("No USB device matching VID_{0}&PID_{1} is present, so selective " +
+                   "suspend was not disabled for it. Plug the ESP32 in and re-run " +
+                   "this script, or writes will start failing once it has been " +
+                   "idle." -f $VendorId, $ProductId)
+}
 
 # --- Log directory ----------------------------------------------------------
 #
