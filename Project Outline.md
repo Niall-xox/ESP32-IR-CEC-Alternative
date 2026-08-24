@@ -633,35 +633,41 @@ to build — and nothing conditional anywhere else.
 | Install | **`sc create` now, MSI at first release** | Packaging follows a working daemon, as it did on Linux. |
 | Recovery | **Restart on failure, 5s delay** | Mirrors `Restart=on-failure` / `RestartSec=5`. Set in the same `sc` sequence as the install. |
 
-### Decision — open
+### Threading model — worker thread
 
-**Threading model.** Where the send happens when a power event arrives.
+Control handlers push the event and return; a single long-lived worker thread
+does the send. The handler reports `SERVICE_*_PENDING` with advancing
+checkpoints during preshutdown so the SCM knows work is still in progress.
 
-- **Blocking handlers with a mutex.** One mutex, no other machinery. Viable
-  because the send is bounded at ~1.5s against roughly 30s of SCM tolerance.
-  Fails *loudly* — a jam makes the service visibly unresponsive.
-- **Worker thread and queue.** The by-the-book pattern. Needs a thread, a queue,
-  a shutdown protocol, and `SERVICE_STATUS` checkpoint reporting during
-  preshutdown. Fails *quietly* — a stuck worker leaves the SCM believing all is
-  well while nothing is sent.
+Blocking inside the handler was considered and rejected. It would have been
+simpler — and viable, since the send is bounded at ~1.5s against roughly 30s of
+SCM tolerance — but the bound lives in `HIDTransport.cpp` while the code relying
+on it lives in `WindowsPowerMonitor.cpp`, with nothing but a comment connecting
+them. Raise `SEND_BUDGET` for a good reason on Linux and the Windows handler
+silently starts blocking longer than the SCM tolerates. The budget is already
+marked as needing measurement, so it *will* change.
 
-Leaning towards blocking handlers: the worker pattern exists for services doing
-genuinely long work, and guards against a slow send that the budget already
-prevents. Its extra machinery fails only during real suspends and shutdowns,
-which is the hardest condition to test. Switching later is contained to one file.
+That is the same defect shape as fix 11 (correctness resting on `-D` ordering)
+and fix 16 (timeouts individually fine, collectively over budget): an invariant
+nothing enforces. The worker removes the coupling entirely — the next person
+needs to know nothing about a constant in another file.
 
-Whichever is chosen, the **mutex belongs in `WindowsPowerMonitor`, not
-`HIDTransport`**. Linux has no concurrency here — sdbus delivers on one thread —
-so locking shared code would impose Windows' problem on a platform without it.
+A single worker also serialises sends by construction, so no mutex is needed;
+`HIDTransport`'s single-threaded assumption holds without shared code gaining a
+lock it does not need on Linux.
 
 ### Risks to check on the real machine
 
-- **Thread safety.** `HIDTransport` has no locking and is documented
-  single-threaded on the assumption of strict request/response. If the SCM can
-  deliver a resume control while a suspend send is still running, two threads
-  could enter `hid_write` at once. The sequence byte prevents crediting the
-  wrong ACK; it does nothing about concurrent access. Keeping the Windows budget
-  short reduces the window but does not close it.
+- **Modern Standby.** The biggest unknown, and it could invalidate the sleep
+  design rather than merely complicate it. Machines using S0 low-power idle do
+  not enter classic S3 suspend, and the power-event model differs — timing,
+  reliability, and whether `PBT_APMSUSPEND` arrives usefully at all. Check with
+  `powercfg /a` **before** writing anything: if S3 is absent and "Standby (S0
+  Low Power Idle)" is present, the sleep path needs designing against that model
+  instead. Everything else here assumes classic S3.
+- **Thread safety.** The single worker serialises sends, so `HIDTransport`'s
+  single-threaded assumption holds by construction. Worth confirming that no
+  other path can call `send()` concurrently once the worker exists.
 - **The ~2s grace period** is guidance, not a contract. Measure it.
 - **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
   that works under whichever account is chosen.
@@ -672,6 +678,20 @@ Mirror what was done on Linux, since that is what "up to standard" means here:
 sleep, wake (both user-initiated *and* automatic — the case currently broken),
 shutdown, boot, service restart not sending ON, unconfigured profile answering
 ERR, and graceful behaviour with the ESP32 unplugged.
+
+### Gaps against a genuinely commercial Windows product
+
+The decisions above are sound, but the plan they add up to is not yet what a
+shipped Windows product looks like. Named here so the difference is deliberate
+rather than discovered later.
+
+| Gap | Notes |
+|---|---|
+| **Code signing** | Unsigned binaries and installers trigger SmartScreen warnings, and many corporate environments refuse them outright. A commercial Windows product signs both. Needs a certificate — a real cost, and a lead time. Nothing in the plan currently mentions it. |
+| **Device arrival / removal notification** | Both platforms currently discover a missing ESP32 by *failing a write* and then reopening. Windows offers `SERVICE_CONTROL_DEVICEEVENT` via `RegisterDeviceNotification`, and Linux has udev monitoring. Reacting to a plug event beats retrying blindly, and it is the more idiomatic Windows design. A symmetric gap, not a Windows-only one. |
+| **Installer scope** | An MSI has to do more than register the service: upgrade in place, stop the service before replacing the binary, uninstall cleanly, and remove its directories. "MSI at first release" understates this. |
+| **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. "Restart on failure, 5s" specifies one of those. A commercial service decides all of them, including whether to stop retrying eventually. |
+| **Automated tests** | There are none, and Windows makes it two platforms verified by hand. Every future change now needs exercising twice, and the Windows half needs a machine that suspends. |
 
 ---
 
