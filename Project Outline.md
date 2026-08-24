@@ -569,15 +569,67 @@ the real grace period.
 **`daemon/CMakeLists.txt`** — every `install()` rule and the whole CPack block
 are inside `if(UNIX AND NOT APPLE)`. Windows has no install path at all.
 
-### Open decisions — needed before building
+### Logging — decided
 
-1. **Logging destination.** Event Log, a log file, or redirecting stdout to a
-   file at service start so every existing `std::cout` keeps working unchanged.
-   This shapes everything else and is the only item touching shared code.
-2. **Service account.** LocalSystem is the easy default. Linux went from root to
+**Redirect stdout and stderr to a file when running as a service.** Roughly five
+lines at service start; every existing `std::cout` in the daemon keeps working
+untouched, and the output stays byte-identical to what Linux writes to the
+journal — which matters while the two platforms are being compared against each
+other.
+
+The redirect is conditional. `StartServiceCtrlDispatcherW` fails with
+`ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` when the process was not launched by
+the SCM, which is the standard way to tell "running as a service" from "run by
+hand in a terminal". Console output stays untouched in the second case, so
+development does not mean tailing a file.
+
+The log gains a size check at startup — rename to `.old` past a megabyte. At the
+daemon's rate, a handful of lines a day, that is under a megabyte a year; the
+check is insurance, not a rotation scheme.
+
+Event Log was the alternative. It is the idiomatic choice and self-bounding, but
+it needs a registered event source, a message resource DLL for clean formatting,
+and a logging abstraction spanning both platforms — real work whose benefits
+accrue to administrators managing machines they did not build, which is not the
+situation yet.
+
+### Planned: abstract logging behind an interface
+
+Once both platforms are verified working, logging should move behind an
+interface the way transport and power events already are. This is deliberate
+sequencing — get it working, then consolidate — not an oversight.
+
+The gain is larger than swapping a file for the Event Log. Platform-specific
+code is currently scattered across four places, and interfaces are what pull it
+back together:
+
+| Platform-specific today | Behind an interface |
+|---|---|
+| logging: file vs journal | `ILogger` — `FileLogger`, `EventLogLogger`, journal-by-stdout |
+| `systemJustBooted()` — `/proc/uptime` vs `GetTickCount64()` | `IPowerMonitor::justBooted()` — it is a system-power question, and the monitor already owns those |
+| `SEND_BUDGET` / `ACK_TIMEOUT` — `#if defined(_WIN32)` | the monitor supplies it — see below |
+| choosing which implementations to construct | stays; one conditional in `main.cpp` |
+
+The budget one is the most interesting. It is not really *platform*-specific, it
+is **event**-specific: how long will this OS wait for me, for *this* event?
+Linux answers 5s for both sleep and shutdown. Windows answers ~2s for sleep and
+minutes for shutdown. That knowledge belongs to `IPowerMonitor`, which raises
+the event, not to a transport that has no idea why it is being called.
+
+Caveat: acting on that means `ITransport::send()` taking a budget, which is an
+interface change touching both transports and the archived CDC one. Worth doing
+only alongside the rest of the consolidation, not on its own.
+
+End state: exactly one platform conditional in `main.cpp` — which implementations
+to build — and nothing conditional anywhere else.
+
+### Open decisions — still needed before building
+
+1. **Service account.** LocalSystem is the easy default. Linux went from root to
    an unprivileged user during hardening; the same question applies here, though
-   Windows needs no udev equivalent for HID access.
-3. **Install method.** Documented `sc create` sequence, or an MSI.
+   Windows needs no udev equivalent for HID access. Unknown attached: whether
+   hidapi's `CreateFile` open works under a low-privilege account.
+2. **Install method.** Documented `sc create` sequence, or an MSI.
 
 ### Risks to check on the real machine
 
