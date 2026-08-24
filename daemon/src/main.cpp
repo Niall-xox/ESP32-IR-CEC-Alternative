@@ -179,7 +179,20 @@ int main() {
     // decided before anything is written to it, and a second instance must not
     // get as far as opening the device.
     const bool console = consoleMode();
-    if (!console) redirectLogsToFile();
+    if (console) {
+        // The log strings are UTF-8, because the sources are and Linux writes
+        // them to the journal unchanged. A Windows console defaults to an OEM
+        // code page and renders every em-dash as "ÔÇö". Switching the console
+        // rather than the strings keeps both platforms emitting identical
+        // bytes, which is the property that makes their logs comparable.
+        //
+        // The log file needs no equivalent: it receives the same UTF-8 bytes.
+        // Readers do have to be told — Get-Content in Windows PowerShell 5.1
+        // assumes the ANSI code page and needs -Encoding UTF8.
+        SetConsoleOutputCP(CP_UTF8);
+    } else {
+        redirectLogsToFile();
+    }
 
     if (!claimSingleInstance()) {
         std::cerr << "[error] Another instance is already running — refusing to start.\n"

@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 static constexpr size_t REPORT_SIZE = 64;
@@ -31,6 +33,28 @@ static constexpr auto OPEN_POLL = std::chrono::milliseconds(100);
 // Bounds the drain loop so a device streaming reports cannot hold us there.
 static constexpr int MAX_DRAIN_REPORTS = 64;
 
+// The USB product string the firmware advertises, used to tell our device from
+// anything else answering to the same VID/PID. Not a substitute for a
+// registered pair — a string is no more unique than the numbers are — but it
+// distinguishes "the first device the OS happened to enumerate" from "the one
+// that says it is ours", which is the difference between a coin flip and a
+// choice. Must match USB.productName() in firmware/src/main.cpp.
+static constexpr wchar_t EXPECTED_PRODUCT[] = L"ESP32 IR Remote";
+
+// Narrows a hidapi wide string for logging. Descriptor strings here are ASCII;
+// anything else becomes '?' rather than dragging locale conversion into a log
+// line. Handles both 2-byte and 4-byte wchar_t, so it is the same code on both
+// platforms.
+static std::string narrow(const wchar_t* w) {
+    if (!w) return "(none)";
+    std::string out;
+    for (const wchar_t* p = w; *p; ++p) {
+        const auto c = static_cast<unsigned long>(*p);
+        out += (c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '?';
+    }
+    return out;
+}
+
 HIDTransport::HIDTransport(uint16_t vid, uint16_t pid) : vid_(vid), pid_(pid) {
     if (hid_init() != 0) {
         throw std::runtime_error("hid_init() failed — no usable HID backend");
@@ -53,11 +77,67 @@ void HIDTransport::closeDevice() {
     }
 }
 
+hid_device* HIDTransport::openMatching() {
+    hid_device_info* list = hid_enumerate(vid_, pid_);
+    if (!list) return nullptr;  // nothing present; the caller retries
+
+    int count = 0;
+    for (const hid_device_info* d = list; d; d = d->next) ++count;
+
+    // One match is the ordinary case and takes exactly the path it always did.
+    if (count == 1) {
+        hid_free_enumeration(list);
+        return hid_open(vid_, pid_, nullptr);
+    }
+
+    // More than one device answers to this VID/PID, and hid_open() would take
+    // whichever the OS enumerated first — a choice that silently changes on
+    // every replug. Naming them all turns "it works sometimes" into something
+    // with a cause attached.
+    std::cerr << "[transport] " << count << " devices match VID="
+              << std::hex << vid_ << " PID=" << pid_ << std::dec
+              << " — the placeholder IDs are not unique. Candidates:\n";
+    for (const hid_device_info* d = list; d; d = d->next) {
+        std::cerr << "[transport]   product=\"" << narrow(d->product_string)
+                  << "\" manufacturer=\"" << narrow(d->manufacturer_string)
+                  << "\" interface=" << d->interface_number
+                  << " usage_page=" << std::hex << d->usage_page
+                  << " usage=" << d->usage << std::dec
+                  << " path=" << (d->path ? d->path : "(none)") << "\n";
+    }
+
+    const hid_device_info* chosen = nullptr;
+    for (const hid_device_info* d = list; d; d = d->next) {
+        if (d->product_string && std::wcscmp(d->product_string, EXPECTED_PRODUCT) == 0) {
+            chosen = d;
+            break;
+        }
+    }
+
+    hid_device* opened = nullptr;
+    if (chosen) {
+        std::cerr << "[transport] Selecting the one identifying as \""
+                  << narrow(EXPECTED_PRODUCT) << "\"\n";
+        opened = hid_open_path(chosen->path);
+    } else {
+        // Nothing claims to be us. Falling back to the first match keeps the
+        // old behaviour rather than refusing to run, but it is a guess and
+        // says so.
+        std::cerr << "[transport] None identifies as \"" << narrow(EXPECTED_PRODUCT)
+                  << "\" — falling back to the first match, which may not be"
+                     " the ESP32\n";
+        opened = hid_open(vid_, pid_, nullptr);
+    }
+
+    hid_free_enumeration(list);
+    return opened;
+}
+
 bool HIDTransport::ensureOpen(TimePoint deadline) {
     if (dev_) return true;
 
     while (true) {
-        dev_ = hid_open(vid_, pid_, nullptr);
+        dev_ = openMatching();
         if (dev_) {
             std::cout << "[transport] HID device opened (VID="
                       << std::hex << vid_ << " PID=" << pid_ << std::dec << ")\n";
@@ -117,14 +197,19 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
     std::memcpy(txBuf + 2, cmd.c_str(), std::min(cmd.size(), REPORT_SIZE - 2));
 
     if (hid_write(dev_, txBuf, sizeof(txBuf)) < 0) {
-        std::cerr << "[transport] Write failed — reopening device\n";
+        // Report what the backend said. "Write failed" alone cannot distinguish
+        // a device unplugged mid-command from a handle opened onto something
+        // that is not the ESP32 at all, and those want opposite responses.
+        std::cerr << "[transport] Write failed (" << narrow(hid_error(dev_))
+                  << ") — reopening device\n";
         closeDevice();
         if (!ensureOpen(deadline)) {
             std::cerr << "[transport] ESP32 not found after reopen — skipping: " << cmd << "\n";
             return false;
         }
         if (hid_write(dev_, txBuf, sizeof(txBuf)) < 0) {
-            std::cerr << "[transport] Write failed after reopen — skipping: " << cmd << "\n";
+            std::cerr << "[transport] Write failed after reopen ("
+                      << narrow(hid_error(dev_)) << ") — skipping: " << cmd << "\n";
             closeDevice();
             return false;
         }
@@ -152,7 +237,8 @@ bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadl
         if (res < 0) {
             // The handle is dead — usually the device was unplugged mid-command.
             // Drop it so the next send() reopens rather than failing again.
-            std::cerr << "[transport] Read failed — dropping device handle\n";
+            std::cerr << "[transport] Read failed (" << narrow(hid_error(dev_))
+                      << ") — dropping device handle\n";
             closeDevice();
             return false;
         }

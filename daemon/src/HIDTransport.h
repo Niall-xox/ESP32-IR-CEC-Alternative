@@ -53,6 +53,13 @@ private:
 
     // Opens the device if it is not already open, retrying until `deadline`.
     bool ensureOpen(TimePoint deadline);
+
+    // One attempt at opening the right device. When several answer to the
+    // VID/PID it names them all and prefers the one whose USB product string
+    // identifies it, rather than taking whichever the OS enumerated first —
+    // an order that changes on every replug.
+    hid_device* openMatching();
+
     void closeDevice();
 
     // Discards reports left over from commands that already timed out.
