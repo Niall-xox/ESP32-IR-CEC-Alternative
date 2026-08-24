@@ -78,6 +78,17 @@ deliberate, not an oversight. The CAD directory likewise models the housing
 around an `ESP32-S3_Zero.step`, another similarly-sized S3 board used as a
 stand-in.
 
+### CAD sources
+
+`3D modeling/` holds `ESP32-Remote-Housing.FCStd` — the FreeCAD master, and the
+only housing file that is tracked — alongside `.STEP` component models for the
+board, IR transmitter, OLED and button.
+
+`.FCBak` and `.stl` are gitignored. FreeCAD writes a backup beside the master on
+every save, and mesh exports are derived files that go stale the moment the model
+changes; re-export from the `.FCStd` rather than trusting a committed one.
+`git add -f` if a specific export ever needs shipping.
+
 ---
 
 ## Architecture

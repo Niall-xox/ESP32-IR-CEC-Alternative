@@ -8,3 +8,13 @@ CMakeFiles/
 
 # Claude Code internal files
 .claude/
+
+# FreeCAD backups. Written automatically beside the .FCStd on every save, so
+# they accumulate and churn without ever being the file anyone wants.
+*.FCBak
+
+# Mesh exports. The .FCStd is the editable master — re-export rather than
+# tracking a derived file that goes stale the moment the model changes.
+# Force-add with `git add -f` if a specific export ever needs shipping.
+*.stl
+*.STL
