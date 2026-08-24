@@ -14,10 +14,55 @@ name: Packages
 on:
   push:
     tags: ['v*']
+    branches: ['main']
+  pull_request:
   workflow_dispatch:
 
 jobs:
+  # Compile-only, on every push rather than on tags.
+  #
+  # The Windows sources went a long time never having been compiled even once,
+  # and nothing would have noticed if they stopped compiling — the packaging
+  # jobs below only run on a v* tag, and neither of them touches Windows. This
+  # produces no artifact on purpose: its whole job is to fail loudly when the
+  # half of the tree that nobody builds locally stops building.
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install hidapi via vcpkg
+        run: vcpkg install hidapi:x64-windows
+
+      - name: Configure
+        run: >
+          cmake -B daemon/build -S daemon -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build
+        run: cmake --build daemon/build --config Release
+
+  # Compile-only for Linux, for the same reason: the packaging jobs prove the
+  # tree builds only at release time, which is the worst moment to find out it
+  # does not.
+  linux-build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            cmake g++ pkg-config libsdbus-c++-dev libhidapi-dev
+      - name: Configure and build
+        run: |
+          cmake -B daemon/build -S daemon
+          cmake --build daemon/build
+
   deb:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # debian:trixie carries sdbus-c++ 2.1.0. Note this cannot be built on the
     # bare ubuntu-latest runner: Ubuntu 24.04 LTS still ships 1.4.0, and the
@@ -54,6 +99,7 @@ jobs:
           path: daemon/build/*.deb
 
   rpm:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # Rawhide, not a stable Fedora — Fedora 42 ships sdbus-c++ 1.5.0, which the
     # daemon cannot build against. 2.x landed for F44. Until that is a stable
