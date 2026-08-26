@@ -36,6 +36,15 @@ HDMI-CEC without requiring CEC support on either device.
 | Shutdown               | Turn TV off  |
 | Enter sleep            | Turn TV off  |
 
+**On Windows the screen blanking also turns the TV off**, and the display
+returning turns it back on. That is a deliberate divergence from Linux rather
+than an accident: Modern Standby machines never enter a classic suspend, so
+display state is the only signal that fires on them at all, and it answers "is
+anyone there?" more directly than a sleep state does. A TV lit up showing a
+blanked desktop is not a state anyone wants either. Media playback is unaffected
+— players assert `ES_DISPLAY_REQUIRED`, so the screen does not blank during it.
+See [driving from display state](#driving-from-display-state).
+
 Existing solutions (e.g. Wake-on-LAN, network-based control) are unreliable and
 dependent on network state. This device operates at the USB layer, making it
 robust and network-independent.
@@ -212,7 +221,7 @@ The daemon finds the device by VID/PID — no port numbers or paths.
 | Product name | `ESP32 IR Remote` | Shown in system device list |
 | Manufacturer | `ESP32-IR-CEC` | Shown in system device list |
 
-These must match in **four** places:
+These must match in **five** places:
 
 | File | Form |
 |---|---|
@@ -220,10 +229,19 @@ These must match in **four** places:
 | `daemon/src/main.cpp` | `0x` hex |
 | `99-esp32-ir-remote.rules` | lowercase hex, no `0x` |
 | `packaging/windows/install-service.ps1` | hex, no `0x`, as `-VendorId` / `-ProductId` defaults |
+| `packaging/windows/verify-windows.ps1` | hex, no `0x`, same defaults |
 
-The fourth is newer than the rest: the Windows installer needs the pair to find
-the device's registry key and disable USB selective suspend on it. See
-[USB selective suspend](#usb-suspend--the-defect-the-windows-build-found).
+The last two are Windows-side and newer than the rest. The installer needs the
+pair to find the device's registry key and disable USB selective suspend on it;
+the verification script needs it to report whether the device is present and
+what those registry values currently say.
+
+That the count has gone from three to four to five is the argument for a single
+generated header rather than five hand-kept copies — and the reason the
+placeholder pair is listed as
+[blocking release](#blocking-release) rather than as a tidy-up. Five places is
+where "change them together" stops being advice and starts being a defect
+waiting for the one that gets missed.
 
 For open-source release, a free registered pair is available from
 [pid.codes](https://pid.codes). Commercial release needs a USB-IF VID.
@@ -439,21 +457,39 @@ make that the common case.
 Two platform-specific concerns sit behind abstract interfaces:
 
 ```
-IPowerMonitor   — raises OnSleep, OnWake, OnShutdown events
-ITransport      — bool send(const std::string& cmd)
+IPowerMonitor   — raises OnSleep, OnWake, OnShutdown
+                  and OnDeviceChange where the platform reports it;
+                  answers sleepBudget()
+ITransport      — bool send(cmd, budget = 0)
+                  void invalidate()
 ```
 
 `main.cpp` only ever touches these. Platform implementations are compiled in or
 out by CMake.
 
-| Concern       | Linux                      | Windows                          |
-|---------------|----------------------------|----------------------------------|
-| Power events  | sdbus-c++ / systemd-logind | Win32 Service API                |
-| HID transport | hidapi (hidraw backend)    | hidapi (Win32 backend)           |
-| Build system  | CMake                      | CMake                            |
+The two additions past the original three events are both defaulted, so a
+platform that has no answer for them implements nothing. `sleepBudget()` returns
+zero — "no limit beyond the transport's own default" — and `OnDeviceChange` is
+simply never raised. Linux takes both defaults.
 
-hidapi is cross-platform, so `HIDTransport` is unchanged on both. Only
+| Concern         | Linux                      | Windows                          |
+|-----------------|----------------------------|----------------------------------|
+| Power events    | sdbus-c++ / systemd-logind | Win32 Service API                |
+| Presence signal | *(none — sleep state only)* | console display state           |
+| Device presence | *(none — reopen on failure)* | `SERVICE_CONTROL_DEVICEEVENT`   |
+| Sleep budget    | 4s, backed by a delay inhibitor | ~1.5s, and nothing can delay a suspend |
+| HID transport   | hidapi (hidraw backend)    | hidapi (Win32 backend)           |
+| Logging         | stdout → journal           | stdout redirected to a file      |
+| Build system    | CMake                      | CMake                            |
+
+hidapi is cross-platform, so `HIDTransport` is unchanged on both — the only
+conditional in it is a hidapi *version* guard, not a platform one. Only
 `IPowerMonitor` needs a platform-specific implementation.
+
+Logging is the one concern still handled by a conditional in `main.cpp` rather
+than behind an interface. That is deliberate sequencing rather than an
+oversight — see
+[Planned: abstract logging](#planned-abstract-logging-behind-an-interface).
 
 The transport seam is also what makes the CDC path viable: swapping
 `HIDTransport` for `archive/SerialTransport` in `main.cpp` is the entire change
@@ -464,16 +500,22 @@ so.
 
 ### Windows status
 
-**Never run.** `WindowsPowerMonitor.*` was written to prove the `IPowerMonitor`
-boundary held while work continued on Linux, not as a working implementation. It
-has never been compiled or executed on Windows, and it predates both fix 1
-(`send()` returning `bool`) and the sequenced protocol, so it is stale as well as
-untested.
+**Built and complete; never run as a service.** `WindowsPowerMonitor.*` was
+rewritten on 2026-08-24 and finished on 2026-08-26. It builds under MSVC, and
+`--console` has opened the device, sent `ON` and received the ACK on real
+hardware. What has never happened is the service running — so every power event
+it handles is still an unverified assumption.
 
-The boundary did its job: `ITransport`, `IPowerMonitor` and `HIDTransport` carry
-no platform conditionals at all. But "no changes outside `WindowsPowerMonitor`"
-turned out to be wrong — see [Windows — in progress](#windows--in-progress) for
-the full plan.
+The full picture, including which of the three power models each part covers, is
+in [Windows — in progress](#windows--in-progress).
+
+The `IPowerMonitor` boundary did its job: `ITransport`, `IPowerMonitor` and
+`HIDTransport` carry no platform conditionals. But the original expectation of
+"no changes outside `WindowsPowerMonitor`" was wrong, and stayed wrong — the
+send budget became a parameter on `send()`, the transport gained
+`invalidate()`, and the monitor interface gained a device-presence callback.
+Each is defaulted so Linux is untouched, which is the shape the boundary was
+supposed to allow and did.
 
 ### Daemon source map
 
@@ -598,6 +640,7 @@ Not on this list and still open from before any of it: the release guard on
 
 An earlier version of this brief claimed Windows was "confirmed working". That
 was a typo and is not true — recorded here so the claim does not resurface.
+
 ### Where the implementation departs from the plan
 
 Six things came out differently once the code was written. Recorded because a
@@ -797,7 +840,15 @@ If the first turns out to be false, the fallback is asserting ON at service
 start unconditionally, which is wrong only for a restart that happens while the
 display is off.
 
-### Required changes
+### Required changes — all landed
+
+**Every item below is done.** Kept as the record of what was decided and why,
+because the reasoning is what stops a later change quietly undoing one of them —
+not as a list of outstanding work. What came out differently once the code was
+written is in
+[where the implementation departs](#where-the-implementation-departs-from-the-plan);
+what was added afterwards is in
+[completing the three power models](#completing-the-three-power-models--2026-08-26).
 
 **`WindowsPowerMonitor.cpp` — rewrite rather than edit.** The Win32 boilerplate
 (dispatch table, `RegisterServiceCtrlHandlerExW`, `SERVICE_STATUS` setup, the
@@ -859,11 +910,12 @@ enforces will eventually be violated — applies here with equal force. A
 **`daemon/CMakeLists.txt`** — every `install()` rule and the whole CPack block
 are inside `if(UNIX AND NOT APPLE)`. Windows has no install path at all.
 
-**`.github/workflows/packages.yml`** — add a `windows-latest` job that
-configures and builds, on push rather than on tags. The Windows sources have
-never been compiled even once, and nothing currently would notice if they stopped
-compiling. This is the cheapest item on the list by a wide margin and the only
-one that turns "stale on top of untested" into a standing guarantee.
+**`.github/workflows/packages.yml`** — a `windows-latest` job that configures
+and builds, on push rather than on tags. At the time this was written the
+Windows sources had never been compiled even once, and nothing would have
+noticed if they stopped compiling. The cheapest item on the list by a wide
+margin, and the only one that turned "stale on top of untested" into a standing
+guarantee. A matching `linux-build` job was added alongside it.
 
 ### Logging — decided
 
@@ -914,7 +966,7 @@ sequencing — get it working, then consolidate — not an oversight.
 
 Two rows that used to be on this list have left it. The send budget is being
 done now as a defaulted parameter rather than deferred, for the reasons in
-[Required changes](#required-changes). And `systemJustBooted()` no longer needs
+[Required changes](#required-changes--all-landed). And `systemJustBooted()` no longer needs
 consolidating: it stays Linux-only, because the Windows answer to the same
 question comes from display state rather than from an uptime reading. The
 abstraction that looked necessary turned out to be a translation that should not
@@ -963,6 +1015,14 @@ code gaining a lock it does not need on Linux. It does *not* cover
 reports status too, so the struct and `SetServiceStatus` are now touched from
 both the SCM handler thread and the worker. That needs a mutex; the transport
 does not.
+
+That invariant is why the device-removal notification added in 2026-08-26 does
+not call `ITransport::invalidate()` from the handler, even though it would be
+one line. The handler records the removal and returns; the worker performs the
+invalidation before its next send. A notification that reached across to the
+transport directly would break the single-threaded guarantee the worker exists
+to provide, and would do it from the one code path where the device really is
+disappearing underneath an in-flight write.
 
 **The queue holds a state, not a backlog.** `ON` and `OFF` are idempotent
 assertions about what the TV should be, not commands that each need executing,
@@ -1264,8 +1324,28 @@ history has the incidents. Breaking one of these is how the project regresses.
 
 **Timing**
 
-- `send()` must complete within logind's `InhibitDelayMaxSec` (5s default). One
-  shared budget, currently 4s, covering open + reopen + ACK wait.
+- The send budget belongs to the *event*, not the transport. It is however long
+  this OS will wait for us before proceeding without us, and only the caller
+  knows that. `IPowerMonitor::sleepBudget()` supplies it; `send()` takes it as a
+  defaulted parameter and only ever tightens its own default, never loosens it.
+- Linux: `send()` must complete within logind's `InhibitDelayMaxSec` (5s
+  default). One shared budget, currently 4s, covering open + reopen + ACK wait.
+- Windows: a suspend cannot be delayed at all. `PBT_APMSUSPEND` is a
+  notification, the machine goes down about two seconds later regardless, and
+  the sleep budget is 1500ms for that reason. Shutdown is the opposite case —
+  preshutdown allows minutes — so only the sleep path is constrained.
+
+**Threading**
+
+- `HIDTransport` is single-threaded and holds no lock. Everything that touches
+  it must run on one thread.
+- On Windows that thread is the worker. A service control handler records what
+  happened and returns; it never sends, and never invalidates the transport.
+  This applies to device notifications exactly as it does to power events.
+- `SERVICE_STATUS` is the exception that proves it: the worker advances
+  checkpoints while the handler also reports state, so that struct *does* need a
+  mutex. The transport does not, and must not be given one to paper over a call
+  from the wrong thread.
 
 **Persistence**
 
@@ -1274,7 +1354,7 @@ history has the incidents. Breaking one of these is how the project regresses.
 - Any index into the profile list is range-checked at the point of use, not
   only at the point of writing.
 
-**Inhibitor lock**
+**Inhibitor lock** — Linux only; Windows has no equivalent and cannot delay a suspend
 
 - Re-acquired on resume, ready for the next sleep.
 - Acquisition never throws — it runs inside D-Bus signal handlers, where an
@@ -1283,9 +1363,22 @@ history has the incidents. Breaking one of these is how the project regresses.
 
 **Process lifecycle**
 
-- The startup `ON` mirrors a *boot*, not a process start.
+- A command asserting the TV's state must be caused by something that implies a
+  person is there. Linux answers that with the uptime gate — the startup `ON`
+  mirrors a *boot*, not a process start. Windows answers it with console display
+  state, which asks the question directly. Neither may be replaced by "the
+  service started", and `PBT_APMRESUMEAUTOMATIC` may never assert `ON`: a
+  machine waking itself for a maintenance window is not somebody walking into
+  the room.
+- Only one process may hold the device. Two openers of the same HID device
+  consume each other's ACKs, which the sequence byte cannot catch — the reply is
+  well-formed and correctly numbered, just for somebody else's request. Linux
+  gets this from the service unit; Windows needs the named mutex.
 - `std::cout` must be unbuffered (`std::unitbuf`). Under systemd stdout is a
-  pipe, so it is fully buffered by default and log lines never reach the journal.
+  pipe, so it is fully buffered by default and log lines never reach the journal;
+  redirected to a file on Windows it is buffered for the same reason. Anything
+  written just before the process is stopped is lost otherwise — including the
+  `OFF` confirmation on shutdown, which is the one line most worth having.
 
 **Privilege**
 
@@ -1550,10 +1643,17 @@ one build feeds every distribution:
 | Arch | `PKGBUILD` | the user's own machine (`makepkg -si`) |
 | NixOS | flake module | `nix build` |
 
-`.github/workflows/packages.yml` builds the deb and rpm on a `v*` tag and
-attaches them to the release. Containers are required because CPack shells out to
-`dpkg-deb` and `rpmbuild`, and because the base image must actually ship
+`.github/workflows/packages.yml` does two jobs. It compile-builds **both**
+daemons — `windows-build` under MSVC with hidapi from vcpkg, `linux-build` in a
+Debian container — on every push to `main` and on every pull request, producing
+no artifact: the point is to fail loudly when the half of the tree nobody builds
+locally stops building. Separately, on a `v*` tag, it builds the deb and rpm and
+attaches them to the release. Containers are required there because CPack shells
+out to `dpkg-deb` and `rpmbuild`, and because the base image must actually ship
 sdbus-c++ 2.x.
+
+The firmware is built by neither. See
+[Process](#process) in the known issues.
 
 `packaging/postinst` and `prerm` are shared by both packages. They avoid reading
 `$1` where possible, since dpkg passes `configure`/`remove` and rpm passes
@@ -1626,7 +1726,7 @@ Two ways out, neither done:
 
 | Issue | Notes |
 |---|---|
-| Placeholder VID/PID | `1234:5678` are common hobbyist defaults, so another device could collide — `hid_open` takes the first match. Must be changed in three files together. |
+| Placeholder VID/PID | `1234:5678` are common hobbyist defaults, so another device could collide — `hid_open` takes the first match. Must be changed in **five** files together; see [USB device identity](#usb-device-identity). Five hand-kept copies is itself the argument for generating them from one source. |
 | Samsung / Sony / TCL / Hisense codes are `0x0` | No longer dangerous — the device reports these honestly — but the profiles are non-functional until real discrete codes are found. |
 | No LICENSE or README | Both `PKGBUILD` and the RPM declare MIT while the repository ships no licence text. |
 
@@ -1658,7 +1758,7 @@ claim in the same table, which is the habit the
 
 | Issue | Notes |
 |---|---|
-| CI does not build on ordinary commits | `packages.yml` runs on `v*` tags and manual dispatch only, and never builds the firmware. A broken tree is discovered at release time. |
+| CI does not build the firmware | `packages.yml` builds both daemons on every push to `main` and on pull requests, so a daemon that stops compiling is caught immediately. The **firmware** is built by nothing — a change that breaks it is found by flashing, or not at all. |
 | No release guard | Nothing stops a `v*` tag publishing packages while the VID/PID are still placeholders. |
 
 ### Verified on hardware — second pass
@@ -1701,7 +1801,6 @@ or the daemon's new retry budget.
 
 What did **not** happen is covered under
 [what Linux actually does across a suspend](#what-linux-actually-does-across-a-suspend).
-
 
 ### Still unverified on hardware
 
@@ -1746,5 +1845,20 @@ That is what the [Invariants](#invariants) section exists to prevent — it stat
 the rule rather than the incident, so the next change has something to violate
 rather than a story to read.
 
+The Windows bring-up is the third chapter, and it produced a different lesson.
+The plan was written against a single machine and would have failed on the two
+configurations that are more common — in both cases by reporting a *plausible
+wrong reason* rather than an error, which is the same failure shape as the first
+hardening pass in a new place. `GetTickCount64()` would have logged "service
+restarted on an already-running system" on every Fast Startup boot, and it would
+have been believed.
+
+It also found a real firmware defect that neither Linux nor a code review would
+have surfaced: the device does not come back from a USB suspend. What identified
+it was noticing the failure tracked *idle time* rather than any command.
+Diagnostics were the whole difference — "Write failed" alone supported four
+different stories equally, and three of them were wrong.
+
 The commit history has the detail: `7afd6bb` for the first pass, `23f3bd3` for
-the second.
+the second, `cc15d74` for the Windows rewrite, `a243f68` for the USB suspend
+fix, and `3d8f37b` for the three power models.
