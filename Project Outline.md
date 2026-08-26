@@ -926,6 +926,55 @@ same grounds. The ordering of the three signals has now been seen both ways
 round, and the outcome did not depend on which arrived first — which is the
 property that makes display state the authority rather than a tiebreak.
 
+### The screen blank is the standby entry
+
+Test 3b, 2026-08-27, with `VIDEOIDLE` set to 5 minutes and `STANDBYIDLE`
+deliberately left at 0 — never — so that a screen blank could be observed
+without a sleep confusing it. That was the plan. It is not what the machine
+does:
+
+```
+[power] 00:10:21.954 display state = dimmed (treated as on)
+[cmd] ON sent and ACK received (display on)
+[power] 00:10:36.135 display state = off
+[cmd] OFF sent and ACK received (display off)
+[power] 00:11:02.488 display state = on
+[cmd] ON sent and ACK received (display on)
+```
+
+Windows' own events put `The system is entering Modern Standby` at **00:10:36**,
+the same second as the blank, with "sleep after" set to never. **On a Modern
+Standby machine the screen blanking and the standby entry are one event, and no
+setting separates them.** "Never sleep" governs nothing here; the display
+timeout is the sleep timeout under another name.
+
+Two consequences, and the first is a decision getting stronger rather than
+weaker:
+
+- **The display-off policy is better justified than the argument that produced
+  it.** It was reversed on 2026-08-26 out of a worry that an idle blank would
+  turn the TV off "under somebody still watching", and confined to machines with
+  no usable suspend event as the lesser evil. On this machine the blank *is* the
+  machine going to sleep. Asserting `OFF` is not a compromise standing in for a
+  suspend signal — it is the correct response to a suspend that Windows declines
+  to announce any other way.
+- **Test 3b and test 4 cannot be told apart here**, which is why the row now
+  carries the qualification rather than a bare yes.
+
+**A dim raises a redundant `ON`.** Fifteen seconds before the blank, Windows
+dims the display, the daemon correctly treats dimmed as on — and sends `ON` to a
+TV that was already on, fourteen seconds before telling it to switch off. This
+is the [repeat rule](#invariants) working exactly as written: outside the
+suspend grace period a repeat is always sent, because discrete codes exist to
+repair drift and skipping the send discards that repair.
+
+It is still the first observed case where the rule fires with no drift possible
+and is contradicted moments later, so it is recorded rather than fixed. The cost
+is one redundant IR burst per idle cycle and nothing else, the benefit is a
+genuinely idempotent design, and narrowing the rule to "changes only" would
+reintroduce the failure the reversal removed. Worth revisiting only if the same
+pattern shows up somewhere it costs more than a wasted frame.
+
 ### Where the implementation departs from the plan
 
 Seven things came out differently once the code was written. Recorded because a
@@ -1781,7 +1830,7 @@ three separate sessions comparable afterwards.
 | 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24, again 2026-08-26 |
 | 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | **yes**, 2026-08-26 |
 | 3 | Display returning turns the TV on | no | no | **yes**, 2026-08-26 — three times, on real resumes |
-| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **not yet possible** — this laptop has both `VIDEOIDLE` and `STANDBYIDLE` set to 0 (never), so it does not blank or sleep on idle at all. Needs a timeout configured before the row means anything |
+| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **yes**, 2026-08-27 with a 5-minute timeout set. TV off, which is the right outcome against this machine's policy line. But the blank could not be separated from a standby entry — see [the blank is the standby](#the-screen-blank-is-the-standby-entry) |
 | 4 | Sleep and wake, user-initiated | no | no | **yes**, 2026-08-26 — three cycles, `OFF sent and ACK received (display off)` going down and `ON` on the way back |
 | 5 | Shutdown, then boot | no | no | **yes**, 2026-08-26 — `OFF` ACKed 613ms before the machine went; `ON` on the way back. See [the Fast Startup shutdown](#the-fast-startup-shutdown--the-suspend-path-does-run-here) |
 | 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
