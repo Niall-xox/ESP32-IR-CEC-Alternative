@@ -31,6 +31,24 @@ public:
     // Called when the system is about to shut down.
     virtual void setOnShutdown(std::function<bool()> cb) = 0;
 
+    // Called when the ESP32 itself appears or disappears, on a platform that
+    // can say so. Strictly this is not a power event — but on Windows it
+    // arrives through the very same channel, a service control handler
+    // receiving device and power notifications alike, and giving it its own
+    // notification path would mean a second platform conditional in main.cpp
+    // for one callback.
+    //
+    // Not pure, and a no-op by default. A platform with no device notification
+    // simply never calls it, and the transport goes on discovering a vanished
+    // device the way it always has — by failing a write and reopening.
+    // LinuxPowerMonitor does not implement it; udev is the equivalent there if
+    // it ever earns its place.
+    //
+    // Implementations must invoke it on the same thread they invoke the power
+    // callbacks on, because the handler is expected to touch the transport and
+    // transports are not required to be thread-safe.
+    virtual void setOnDeviceChange(std::function<void(bool present)> /*cb*/) {}
+
     // Blocks and runs the event loop. Returns only when the process is killed.
     virtual void run() = 0;
 

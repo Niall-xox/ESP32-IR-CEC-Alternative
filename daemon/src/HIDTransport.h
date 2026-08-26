@@ -47,6 +47,17 @@ public:
     bool send(const std::string& cmd,
               std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
 
+    // Closes the handle so the next send() opens the device afresh.
+    //
+    // Called when a Windows device-removal notification says the ESP32 has
+    // gone. Dropping the handle deliberately is not faster than discovering
+    // it on the next failed write — it is one line in the log saying which
+    // of the two happened, on the path where the device re-enumerating
+    // itself after a USB suspend makes that distinction the whole question.
+    //
+    // Safe when nothing is open: closing twice is not an error here.
+    void invalidate() override;
+
 private:
     using Clock     = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;

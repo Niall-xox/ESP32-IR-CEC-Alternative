@@ -48,7 +48,7 @@ if(UNIX AND NOT APPLE)
     find_package(sdbus-c++ 2.0 REQUIRED)
 elseif(WIN32)
     # Windows: power events via the Win32 Service API
-    list(APPEND SOURCES src/WindowsPowerMonitor.cpp)
+    list(APPEND SOURCES src/WindowsPowerMonitor.cpp src/WindowsPowerCapabilities.cpp)
 endif()
 
 # hidapi handles USB HID communication on all platforms.
@@ -80,17 +80,23 @@ add_executable(esp32-ir-daemon ${SOURCES})
 target_include_directories(esp32-ir-daemon PRIVATE src ${HIDAPI_INCLUDE_DIRS})
 
 if(WIN32)
-    # No extra libraries beyond hidapi. Everything the Windows build calls —
-    # the service API, RegisterPowerSettingNotification, the file and
-    # environment functions — resolves from the default MSVC link set. The one
-    # thing that did not was SHGetKnownFolderPath's FOLDERID constant, which is
-    # why the log path is read from the environment instead.
+    # PowrProf carries CallNtPowerInformation, which reports whether this
+    # machine is S3 or Modern Standby and whether Fast Startup is on. It ships
+    # with every Windows SDK under a name that has not changed, so it is linked
+    # normally rather than loaded by hand — unlike the power-setting and
+    # device-interface GUIDs, whose defining libraries do vary by SDK version
+    # and are spelled out in the sources instead.
+    #
+    # Everything else the Windows build calls — the service API,
+    # RegisterPowerSettingNotification, RegisterDeviceNotification, the file
+    # and environment functions — resolves from the default MSVC link set.
     #
     # The Win32 API surface this uses — SERVICE_ACCEPT_PRESHUTDOWN,
-    # RegisterPowerSettingNotification, HPOWERNOTIFY — is Vista and later.
-    # Naming the version rather than inheriting whatever the SDK happens to
-    # default to keeps a toolchain upgrade from silently changing what compiles.
-    target_link_libraries(esp32-ir-daemon PRIVATE hidapi::winapi)
+    # RegisterPowerSettingNotification, HPOWERNOTIFY, HDEVNOTIFY — is Vista and
+    # later. Naming the version rather than inheriting whatever the SDK happens
+    # to default to keeps a toolchain upgrade from silently changing what
+    # compiles.
+    target_link_libraries(esp32-ir-daemon PRIVATE hidapi::winapi PowrProf)
     target_compile_definitions(esp32-ir-daemon PRIVATE
         _WIN32_WINNT=0x0601
         WIN32_LEAN_AND_MEAN

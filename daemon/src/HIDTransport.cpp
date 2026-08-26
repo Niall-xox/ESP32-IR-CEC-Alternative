@@ -89,6 +89,24 @@ void HIDTransport::closeDevice() {
     }
 }
 
+// Deliberate teardown, as opposed to closeDevice() being reached because
+// something failed. The distinction is only visible in the log, and that is the
+// point: after a USB suspend the firmware re-enumerates itself, so the device
+// disappearing and coming back a second later is expected behaviour rather than
+// a fault, and a log that cannot tell the two apart turns the one path most
+// worth trusting into the one hardest to read.
+void HIDTransport::invalidate() {
+    if (!dev_) {
+        // Nothing was open. The notification confirms a state already held, and
+        // saying so is better than silence in a log being read to find out
+        // whether the removal was noticed at all.
+        std::cout << "[transport] Device removal reported; no handle was open\n";
+        return;
+    }
+    std::cout << "[transport] Device removed — handle dropped, will reopen on next send\n";
+    closeDevice();
+}
+
 hid_device* HIDTransport::openMatching() {
     hid_device_info* list = hid_enumerate(vid_, pid_);
     if (!list) return nullptr;  // nothing present; the caller retries

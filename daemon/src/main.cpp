@@ -223,7 +223,7 @@ int main() {
         return 1;
     }
 #elif defined(_WIN32)
-    monitor = std::make_unique<WindowsPowerMonitor>();
+    monitor = std::make_unique<WindowsPowerMonitor>(DEVICE_VID, DEVICE_PID);
     std::cout << "[monitor] Windows Service power monitor initialised\n";
 #else
     std::cerr << "[error] No power monitor available for this platform\n";
@@ -267,6 +267,22 @@ int main() {
 
     monitor->setOnShutdown([&]() {
         return report("OFF", "shutdown", transport->send("OFF"));
+    });
+
+    // Device presence, where the platform reports it. No platform conditional:
+    // the setter is a no-op on an implementation that never calls back, which
+    // is what Linux does — there the transport reopens on a failed write, as it
+    // always has.
+    //
+    // Only the removal is acted on here. An arrival needs the TV re-asserted
+    // rather than the handle touched, and the monitor already owns that
+    // decision because only it knows what state the display is in.
+    //
+    // The monitor guarantees this runs on the same thread as the power
+    // callbacks, which is what makes calling into the transport here safe —
+    // HIDTransport is single-threaded by design and holds no lock.
+    monitor->setOnDeviceChange([&](bool present) {
+        if (!present) transport->invalidate();
     });
 
 #ifdef __linux__

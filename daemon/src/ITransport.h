@@ -30,5 +30,21 @@ public:
     virtual bool send(const std::string& cmd,
                       std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) = 0;
 
+    // Drop any cached connection, so the next send() opens the device afresh.
+    //
+    // For when something outside the transport knows the device has gone — a
+    // Windows device-removal notification — rather than leaving it to be
+    // discovered by the next write failing and reopening. That path still
+    // works and is still the only one on Linux; this makes the Windows log say
+    // *why* the handle was dropped, on the one path where a device vanishing
+    // and coming back is routine rather than exceptional.
+    //
+    // Not pure: a transport holding no connection state has nothing to do here.
+    //
+    // Must be called on the same thread as send(). Implementations are not
+    // required to be thread-safe and HIDTransport is not — WindowsPowerMonitor
+    // routes this through its worker for that reason.
+    virtual void invalidate() {}
+
     virtual ~ITransport() = default;
 };

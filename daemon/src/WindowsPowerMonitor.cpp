@@ -4,10 +4,14 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
+#include <cwchar>
 #include <iostream>
 #include <string>
 
-// The service name must match what was used in `sc create` when installing —
+#include <dbt.h>
+
+// The service name must match what was used when installing —
 // see packaging/windows/install-service.ps1.
 static constexpr wchar_t SERVICE_NAME[] = L"esp32-ir-remote";
 
@@ -20,6 +24,13 @@ static constexpr wchar_t SERVICE_NAME[] = L"esp32-ir-remote";
 // question entirely.
 static const GUID CONSOLE_DISPLAY_STATE = {
     0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 }
+};
+
+// GUID_DEVINTERFACE_HID, spelled out for exactly the same reason: the SDK
+// declares it in hidclass.h but defines it in hid.lib, which this build does
+// not otherwise need to link.
+static const GUID HID_DEVICE_INTERFACE = {
+    0x4d1e55b2, 0xf16f, 0x11cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 }
 };
 
 // Display-state values delivered with the notification above.
@@ -64,7 +75,24 @@ static void plog(const std::string& msg) {
     std::cout << ("[power] " + std::string(stamp) + " " + msg + "\n");
 }
 
-WindowsPowerMonitor::WindowsPowerMonitor() {
+// Seconds rendered the way somebody reading a log wants them: a standby dip and
+// an overnight hibernate are both "a resume", and the number is what tells them
+// apart, so it has to be legible at both scales.
+static std::string formatSeconds(long long totalSeconds) {
+    if (totalSeconds < 0) return "unknown";
+    if (totalSeconds < 90) return std::to_string(totalSeconds) + "s";
+
+    const long long minutes = totalSeconds / 60;
+    const long long seconds = totalSeconds % 60;
+    if (minutes < 90) {
+        return std::to_string(minutes) + "m " + std::to_string(seconds) + "s";
+    }
+    const long long hours = minutes / 60;
+    return std::to_string(hours) + "h " + std::to_string(minutes % 60) + "m";
+}
+
+WindowsPowerMonitor::WindowsPowerMonitor(uint16_t vid, uint16_t pid)
+    : vid_(vid), pid_(pid) {
     g_instance = this;
 }
 
@@ -80,6 +108,10 @@ WindowsPowerMonitor::~WindowsPowerMonitor() {
         UnregisterPowerSettingNotification(displayNotify_);
         displayNotify_ = nullptr;
     }
+    if (deviceNotify_) {
+        UnregisterDeviceNotification(deviceNotify_);
+        deviceNotify_ = nullptr;
+    }
     if (workerDone_) {
         CloseHandle(workerDone_);
         workerDone_ = nullptr;
@@ -90,6 +122,10 @@ WindowsPowerMonitor::~WindowsPowerMonitor() {
 void WindowsPowerMonitor::setOnSleep(std::function<bool()> cb)    { onSleep_    = std::move(cb); }
 void WindowsPowerMonitor::setOnWake(std::function<bool()> cb)     { onWake_     = std::move(cb); }
 void WindowsPowerMonitor::setOnShutdown(std::function<bool()> cb) { onShutdown_ = std::move(cb); }
+
+void WindowsPowerMonitor::setOnDeviceChange(std::function<void(bool)> cb) {
+    onDeviceChange_ = std::move(cb);
+}
 
 void WindowsPowerMonitor::run() {
     // The dispatch table tells the SCM which function to call when starting the
@@ -145,12 +181,24 @@ void WindowsPowerMonitor::serviceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
         // minutes, where SERVICE_ACCEPT_SHUTDOWN fires too late for reliable
         // USB communication. POWEREVENT delivers both the suspend/resume
         // notifications and the display-state changes registered below.
+        //
+        // Device events need no flag here: they are delivered because of the
+        // RegisterDeviceNotification call, not because the service accepts a
+        // control type.
         std::lock_guard<std::mutex> lock(statusMutex_);
         status_.dwControlsAccepted = SERVICE_ACCEPT_STOP
                                    | SERVICE_ACCEPT_PRESHUTDOWN
                                    | SERVICE_ACCEPT_POWEREVENT;
     }
     reportStatus(SERVICE_RUNNING);
+
+    // Logged before anything else happens, so every log opens by saying which
+    // of the three configurations produced it. Without this line the rest of
+    // the log is ambiguous: a missing PBT_APMSUSPEND is a defect on one machine
+    // and the documented behaviour on another.
+    caps_ = queryPowerCapabilities();
+    plog("machine power model: " + caps_.summary());
+    for (const auto& line : caps_.details()) plog(line);
 
     // Subscribe to console display state. Registering is documented to report
     // the current value immediately, which is what gives the service its
@@ -175,6 +223,33 @@ void WindowsPowerMonitor::serviceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
                      "[monitor] machines and the ON at boot will not work in this mode.\n";
     }
 
+    // Subscribe to HID device arrival and removal. Filtered to this VID/PID in
+    // the handler rather than by the OS: the notification filter selects an
+    // interface *class*, so every HID device on the machine arrives here and
+    // the ones that are not the ESP32 are discarded on inspection.
+    {
+        DEV_BROADCAST_DEVICEINTERFACE_W filter = {};
+        filter.dbcc_size       = sizeof(filter);
+        filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+        filter.dbcc_classguid  = HID_DEVICE_INTERFACE;
+
+        deviceNotify_ = RegisterDeviceNotificationW(
+            reinterpret_cast<HANDLE>(statusHandle_), &filter,
+            DEVICE_NOTIFY_SERVICE_HANDLE);
+
+        if (!deviceNotify_) {
+            // Not fatal, and quieter than the display-state failure above,
+            // because nothing depends on it for correctness: without device
+            // notifications the transport still discovers a vanished device by
+            // failing a write and reopening, exactly as it does on Linux. What
+            // is lost is the prompt retry after the firmware re-enumerates
+            // itself following a USB suspend.
+            std::cerr << "[monitor] RegisterDeviceNotification failed: " << GetLastError()
+                      << " — device arrival and removal will not be seen. The transport\n"
+                         "[monitor] still recovers by reopening on a failed write.\n";
+        }
+    }
+
     // Started last. A notification arriving before this point is not lost: the
     // handler only records the desired state, and the worker reads it as its
     // first action.
@@ -192,7 +267,75 @@ void WindowsPowerMonitor::serviceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
         UnregisterPowerSettingNotification(displayNotify_);
         displayNotify_ = nullptr;
     }
+    if (deviceNotify_) {
+        UnregisterDeviceNotification(deviceNotify_);
+        deviceNotify_ = nullptr;
+    }
     reportStatus(SERVICE_STOPPED);
+}
+
+bool WindowsPowerMonitor::deviceNameMatches(const wchar_t* name) const {
+    if (!name) return false;
+
+    wchar_t needle[32];
+    std::swprintf(needle, sizeof(needle) / sizeof(needle[0]),
+                  L"VID_%04X&PID_%04X",
+                  static_cast<unsigned>(vid_), static_cast<unsigned>(pid_));
+
+    // Upper-cased before comparison. The interface path is documented as
+    // case-insensitive and Windows is not consistent about it in practice —
+    // matching literally works until the day a notification arrives in the
+    // other case and the device silently stops being recognised.
+    std::wstring haystack(name);
+    for (wchar_t& c : haystack) c = static_cast<wchar_t>(std::towupper(c));
+
+    return haystack.find(needle) != std::wstring::npos;
+}
+
+void WindowsPowerMonitor::handleDeviceEvent(DWORD eventType, LPVOID eventData) {
+    if (eventType != DBT_DEVICEARRIVAL && eventType != DBT_DEVICEREMOVECOMPLETE) {
+        return;
+    }
+
+    const auto* hdr = static_cast<const DEV_BROADCAST_HDR*>(eventData);
+    if (!hdr || hdr->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) return;
+
+    const auto* iface = reinterpret_cast<const DEV_BROADCAST_DEVICEINTERFACE_W*>(hdr);
+    if (!deviceNameMatches(iface->dbcc_name)) return;
+
+    if (eventType == DBT_DEVICEARRIVAL) {
+        plog("ESP32 arrived");
+
+        // Re-assert whatever the display last said. This is the retry that
+        // makes a wake survive the firmware re-enumerating itself: the wake ON
+        // was issued while the device was still coming back and failed, which
+        // cleared lastAsserted_, so this send is not suppressed as redundant.
+        //
+        // When the earlier send did succeed, lastAsserted_ still holds and the
+        // worker skips this one — correct, because a device re-enumerating does
+        // not change what the TV is doing.
+        if (lastDisplayState_.has_value()) {
+            requestState(*lastDisplayState_, Trigger::DeviceArrival);
+        } else {
+            plog("no display state known yet — nothing to re-assert");
+        }
+    } else {
+        plog("ESP32 removed");
+
+        // Recorded, not acted on here. The transport is single-threaded by
+        // design and this is the SCM handler thread; the worker performs the
+        // invalidation.
+        requestDeviceInvalidate();
+    }
+}
+
+void WindowsPowerMonitor::logAwayTime() {
+    if (!suspendWallAt_.has_value()) return;
+
+    const auto away = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() - *suspendWallAt_);
+    plog("away for " + formatSeconds(away.count()));
+    suspendWallAt_.reset();
 }
 
 DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LPVOID eventData) {
@@ -220,14 +363,22 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
         queueCv_.notify_all();
         return NO_ERROR;
 
+    case SERVICE_CONTROL_DEVICEEVENT:
+        handleDeviceEvent(eventType, eventData);
+        return NO_ERROR;
+
     case SERVICE_CONTROL_POWEREVENT:
         switch (eventType) {
 
         case PBT_APMSUSPEND:
             // A notification, not a request: the machine goes down about two
-            // seconds from now whatever we do. Secondary to display state,
-            // which normally fires first — lastAsserted_ absorbs the overlap.
-            plog("PBT_APMSUSPEND");
+            // seconds from now whatever we do. Covers hibernate as well as
+            // sleep — Windows announces both this way and does not say which,
+            // which costs nothing because the answer is OFF either way.
+            // Secondary to display state, which normally fires first;
+            // lastAsserted_ absorbs the overlap.
+            plog("PBT_APMSUSPEND (sleep or hibernate)");
+            suspendWallAt_ = std::chrono::system_clock::now();
             requestState(false, Trigger::Suspend);
             return NO_ERROR;
 
@@ -243,6 +394,7 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
             // not symmetric. A spurious OFF is corrected by the next display-on
             // notification; a spurious ON leaves a lit TV in a dark room until
             // somebody notices.
+            logAwayTime();
             if (lastDisplayState_.has_value() && !*lastDisplayState_) {
                 plog("PBT_APMRESUMESUSPEND while display is known off — not asserting on");
                 bumpGeneration();
@@ -266,7 +418,25 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
             // in fact the main case the counter exists for — the worker frozen
             // mid-read by the suspend, thawing here.
             bumpGeneration();
+            logAwayTime();
             plog("PBT_APMRESUMEAUTOMATIC (resume, presence unknown) — not acted on");
+            return NO_ERROR;
+
+        case PBT_APMRESUMECRITICAL:
+            // The machine came back from a power loss it never got to announce
+            // — a dead battery that hibernated in an emergency, or mains lost
+            // on a desktop. Nothing was sent on the way down, so the TV is
+            // whatever it was, and the same presence argument as
+            // PBT_APMRESUMEAUTOMATIC applies: a machine restoring itself is not
+            // evidence anybody is there. The display-state notification that
+            // follows a real wake is what acts.
+            //
+            // Deprecated by Microsoft and still delivered by some systems,
+            // which is reason to name it rather than let it fall through to the
+            // unhandled branch and be logged as an unknown number.
+            bumpGeneration();
+            logAwayTime();
+            plog("PBT_APMRESUMECRITICAL (resume after unannounced power loss) — not acted on");
             return NO_ERROR;
 
         case PBT_POWERSETTINGCHANGE: {
@@ -292,6 +462,7 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
                 break;
             case DISPLAY_ON:
                 plog("display state = on");
+                logAwayTime();
                 lastDisplayState_ = true;
                 requestState(true, Trigger::DisplayState);
                 break;
@@ -341,6 +512,13 @@ void WindowsPowerMonitor::requestState(bool on, Trigger why) {
         generation_.fetch_add(1, std::memory_order_relaxed);
         pendingOn_  = on;
         pendingWhy_ = why;
+
+        // Stamped here rather than in the handler so it is written under the
+        // same lock the worker reads it with, and so it cannot be attributed to
+        // a send that a later event replaced.
+        if (why == Trigger::Suspend) {
+            suspendAnnouncedAt_ = std::chrono::steady_clock::now();
+        }
     }
     queueCv_.notify_all();
 }
@@ -354,6 +532,18 @@ void WindowsPowerMonitor::requestShutdown() {
     queueCv_.notify_all();
 }
 
+// A device removal, queued for the worker. Deliberately does *not* advance the
+// generation: the device going away says nothing about what state the machine
+// is in, and discarding an in-flight send's result on that basis would forget a
+// correct answer.
+void WindowsPowerMonitor::requestDeviceInvalidate() {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        deviceGone_ = true;
+    }
+    queueCv_.notify_all();
+}
+
 void WindowsPowerMonitor::workerLoop() {
     // Registering for display-state notification is documented to deliver the
     // current value straight away, which is what gives the daemon its opening
@@ -361,7 +551,7 @@ void WindowsPowerMonitor::workerLoop() {
     {
         std::unique_lock<std::mutex> lock(queueMutex_);
         const bool arrived = queueCv_.wait_for(lock, INITIAL_STATE_WAIT, [this] {
-            return pendingOn_.has_value() || shutdownRequested_ || stopRequested_;
+            return pendingOn_.has_value() || shutdownRequested_ || stopRequested_ || deviceGone_;
         });
         if (!arrived) {
             // Documented fallback: assume the display is on. Wrong only for a
@@ -375,25 +565,37 @@ void WindowsPowerMonitor::workerLoop() {
 
     while (true) {
         std::optional<bool> want;
-        Trigger  why        = Trigger::Startup;
-        bool     doShutdown = false;
-        bool     doStop     = false;
-        uint64_t gen        = 0;
+        Trigger  why          = Trigger::Startup;
+        bool     doShutdown   = false;
+        bool     doStop       = false;
+        bool     doInvalidate = false;
+        uint64_t gen          = 0;
+        std::optional<std::chrono::steady_clock::time_point> suspendAt;
 
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCv_.wait(lock, [this] {
-                return pendingOn_.has_value() || shutdownRequested_ || stopRequested_;
+                return pendingOn_.has_value() || shutdownRequested_
+                    || stopRequested_ || deviceGone_;
             });
             want = pendingOn_;
             pendingOn_.reset();
-            why        = pendingWhy_;
-            doShutdown = shutdownRequested_;
-            doStop     = stopRequested_;
+            why          = pendingWhy_;
+            doShutdown   = shutdownRequested_;
+            doStop       = stopRequested_;
+            doInvalidate = deviceGone_;
+            deviceGone_  = false;
+            suspendAt    = suspendAnnouncedAt_;
 
             // Read under the same lock that publishes it, so this work is
             // stamped with the generation it actually belongs to.
             gen = generation_.load(std::memory_order_relaxed);
+        }
+
+        // Before any send: the whole point of the notification is that the
+        // handle a send would use is already dead.
+        if (doInvalidate && onDeviceChange_) {
+            try { onDeviceChange_(false); } catch (...) {}
         }
 
         if (doShutdown) {
@@ -435,6 +637,10 @@ void WindowsPowerMonitor::workerLoop() {
                     std::cout << (on ? "[event] Startup — display on\n"
                                      : "[event] Startup — display off\n");
                     break;
+                case Trigger::DeviceArrival:
+                    std::cout << (on ? "[event] ESP32 reconnected — re-asserting on\n"
+                                     : "[event] ESP32 reconnected — re-asserting off\n");
+                    break;
                 }
                 reportPending();
 
@@ -444,6 +650,18 @@ void WindowsPowerMonitor::workerLoop() {
                     else    { if (onSleep_) confirmed = onSleep_(); }
                 } catch (...) {
                     confirmed = false;
+                }
+
+                // How much of the grace period the send actually used. The two
+                // seconds Microsoft documents is guidance rather than a
+                // contract, and this is the only way to find out what a given
+                // machine really allows — measured on the machine, in the log,
+                // rather than assumed.
+                if (why == Trigger::Suspend && suspendAt.has_value()) {
+                    const auto used = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - *suspendAt);
+                    plog("suspend send took " + std::to_string(used.count()) + "ms of the "
+                         + std::to_string(SLEEP_BUDGET.count()) + "ms budget");
                 }
 
                 if (generation_.load(std::memory_order_relaxed) != gen) {
