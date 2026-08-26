@@ -606,8 +606,8 @@ boot — is still unexercised. Last worked on 2026-08-26 —
 |---|---|
 | Windows build | **Works.** Builds under MSVC via vcpkg, and cross-compiles clean under `-Wall -Wextra` for x86_64-w64-mingw32, linking a complete PE. |
 | Device reachable | **Verified 2026-08-24, re-verified 2026-08-26** against the reflashed firmware. `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
-| S3 suspend | **Written.** `PBT_APMSUSPEND` → OFF, `PBT_APMRESUMESUSPEND` → ON. Never run — the 2026-08-24 test machine has no S3 in firmware. |
-| Hibernate (S4) | **Written.** Windows announces hibernate through the same `PBT_APMSUSPEND`, so it needs no separate branch; the resume side is the same two events. Never run. |
+| S3 suspend | **Written; the events seen, the S3 path not.** `PBT_APMSUSPEND` and `PBT_APMRESUMESUSPEND` both fired on 2026-08-26 — on a Fast Startup shutdown, not an S3 suspend — and both behaved correctly, the resume declining to assert `ON` while the display was known off. A real S3 suspend still needs the S3 machine. |
+| Hibernate (S4) | **Partly verified 2026-08-26.** Windows announces hibernate through the same `PBT_APMSUSPEND`, and a Fast Startup shutdown *is* a kernel-session hibernate — that path now works end to end, including `away for 23s` across it. A user-initiated hibernate has still not been run. |
 | Modern Standby | **Verified 2026-08-26** — three real cycles, one of 4h11m, including an unattended maintenance wake that correctly left the TV off. Display state is the only signal that fires on S0ix, and it carried the whole thing. See [what the cycles showed](#what-the-modern-standby-cycles-actually-showed). |
 | Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
@@ -616,7 +616,7 @@ boot — is still unexercised. Last worked on 2026-08-26 —
 | Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
 | Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
 | Display-off scoping | **Changed 2026-08-26, and the branch verified the same day.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. The Modern Standby laptop correctly reports `an idle screen blank turns the TV off (no usable suspend event on this machine)`. The blank itself has not been tested. |
-| Per-event budgets | **Changed 2026-08-26.** The budget and the reason travel with each command, so a display change no longer inherits a suspend's 1500ms or logs itself as `(sleep)`. Never run. |
+| Per-event budgets | **Changed 2026-08-26, and the reason half verified the same day.** The budget and the reason travel with each command. Every command in the log names its own trigger — `(display off)`, `(display on)`, `(ESP32 reconnected)` — and not one is mislabelled `(sleep)`, which is the defect this replaced. The *budget* half is still unmeasured: no send has yet happened under the suspend deadline, because the display-off always gets there first. |
 
 `WindowsPowerMonitor.*` was rewritten against the design in this section. It
 compiles clean under `-Wall -Wextra` via an x86_64-w64-mingw32 cross-compile and
@@ -783,21 +783,22 @@ of a user looking at a dark TV after opening their laptop, and it is the largest
 remaining user-visible defect on this platform even though every component
 behaved exactly as designed.
 
-**Three finished features never fire on this machine at all.** No
-`PBT_APMSUSPEND`, therefore no away-time report, no grace-period measurement,
-and no suspend branch — across four hours of standby the log contains not one
-line from any of them. Two consequences, and the second is the awkward one:
+**No suspend event fires on the standby path.** Across four hours of standby the
+log contains no `PBT_APMSUSPEND`, no away-time report and no grace-period
+measurement — the display-state signal carried all of it alone, which is what it
+was made the primary trigger for.
 
-- The grace-period measurement, built to learn what a machine really allows,
-  can only ever report on machines that were never the concern.
-- **Away-time reporting was added so "a brief Modern Standby dip and an
-  overnight hibernate stop looking identical in the log" — and it is precisely
-  Modern Standby that cannot produce it.** The information is still recoverable
-  by subtracting two timestamps, so nothing is lost that matters; what is wrong
-  is that the feature was scoped to the event class that had a signal rather
-  than to the machines that needed the answer. Same shape as the five decisions
-  the sanity check reversed: correct about the path in front of it, aimed one
-  step wide of the problem.
+That looked at first like three finished features being dead on this machine
+class. **It is not, and the shutdown test the same night proved it**: Fast
+Startup turns a shutdown into a hibernate, that *does* raise `PBT_APMSUSPEND`,
+and away-time reported `away for 23s` across it. So the suspend branch is live
+here — just on the shutdown and boot path rather than the standby one. See
+[the Fast Startup shutdown](#the-fast-startup-shutdown--the-suspend-path-does-run-here).
+
+The point that survives is narrower and still worth keeping: on a Modern Standby
+machine, the *sleep* a user actually performs several times a day produces no
+suspend event at all, so anything hung off that event is invisible for exactly
+the transitions that happen most.
 
 **A staleness guard fired, unprompted and correctly.** On the short cycle the
 arrival re-assert and the display coming on overlapped:
@@ -816,6 +817,45 @@ ACK arrived after the world had changed, was discarded rather than recorded as
 the TV's state, and the `ON` went out behind it. That is the three-way tracking
 — what the screen said, what the daemon concluded, what the TV confirmed —
 doing the job it was separated into three for, on a race nobody had constructed.
+
+### The Fast Startup shutdown — the suspend path does run here
+
+Tests 5 and 13, run 2026-08-26 at 23:46. Windows logs `boot type 0x1`, which is
+Fast Startup, so this was a shutdown that hibernated the kernel session and a
+boot that resumed it — not a cold boot. Test 12 remains the only true one, and
+it still belongs to a machine with Fast Startup turned off.
+
+The whole cycle, twenty-four seconds end to end:
+
+```
+[power] 23:46:24.568 display state = off
+[cmd] OFF sent and ACK received (display off)
+[power] 23:46:25.181 PBT_APMSUSPEND (sleep or hibernate)
+[power] 23:46:25.182 TV already off — no command sent (inside the suspend grace period)
+[power] 23:46:49.072 away for 23s
+[power] 23:46:49.072 PBT_APMRESUMESUSPEND while display is known off — not asserting on
+[power] 23:46:49.133 display state = on
+[cmd] ON sent and ACK received (display on)
+[power] 23:46:49.588 PBT_APMRESUMEAUTOMATIC (resume, presence unknown) — not acted on
+```
+
+Seven things are being proven there, and only two of them were the test:
+
+| | What it shows |
+|---|---|
+| **The TV was off before the machine went** | The `OFF` was sent *and ACKed* 613ms before `PBT_APMSUSPEND` arrived. Nothing was racing a two-second grace period. |
+| **`PBT_APMSUSPEND` fires on this machine after all** | It is a Modern Standby laptop that never raises it for standby, and raises it for a Fast Startup shutdown, because that shutdown *is* a hibernate. Away-time and the suspend branch are live here, on this path only. |
+| **The grace period was never used** | The display went off first, so by the time the suspend arrived the TV was already off and the send was suppressed — correctly, and *only* because that suppression is scoped to the grace period. On this machine the 1500ms budget may never actually be spent, which means it also cannot be measured here. |
+| **The boot `ON` came from display state, not from starting** | There is no service start in the log at all. Fast Startup resumed the same process, so nothing "began" — and the `ON` still happened, because it is driven by the display coming on rather than by the daemon booting. This is exactly the case [the uptime gate could never have handled](#what-each-machine-can-and-cannot-prove), and it is now observed rather than argued. |
+| **`PBT_APMRESUMESUSPEND` correctly declined to assert `ON`** | It fired 61ms before the display came on, and refused, because the display was still known off. Had it asserted, it would have been right by luck here and wrong on every unattended resume. |
+| **`PBT_APMRESUMEAUTOMATIC` was named and ignored** | The invariant that a machine waking itself is not somebody walking into the room, holding on the one path where the two arrive half a second apart. |
+| **Two resume events and a display change produced exactly one command** | Three plausible triggers, one `ON`. |
+
+The order matters more than any single line: display-off, then suspend, then
+resume, then display-on. On this platform the display signal brackets the power
+events on both sides, which is why it can be the authority and the power events
+can be advisory. On an S3 machine with Fast Startup off, that order will not
+hold — and that is the reason the other two machines are still worth testing.
 
 ### Where the implementation departs from the plan
 
@@ -1670,7 +1710,7 @@ three separate sessions comparable afterwards.
 | 3 | Display returning turns the TV on | no | no | **yes**, 2026-08-26 — three times, on real resumes |
 | 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **not yet possible** — this laptop has both `VIDEOIDLE` and `STANDBYIDLE` set to 0 (never), so it does not blank or sleep on idle at all. Needs a timeout configured before the row means anything |
 | 4 | Sleep and wake, user-initiated | no | no | **yes**, 2026-08-26 — three cycles, `OFF sent and ACK received (display off)` going down and `ON` on the way back |
-| 5 | Shutdown, then boot | no | no | no |
+| 5 | Shutdown, then boot | no | no | **yes**, 2026-08-26 — `OFF` ACKed 613ms before the machine went; `ON` on the way back. See [the Fast Startup shutdown](#the-fast-startup-shutdown--the-suspend-path-does-run-here) |
 | 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
 | 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
 | 8 | Graceful behaviour with the ESP32 absent entirely | no | no | **yes**, 2026-08-26 — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up; a send with no device logs `ON FAILED — no ACK, TV state not changed` rather than claiming success |
@@ -1681,9 +1721,9 @@ three separate sessions comparable afterwards.
 
 | | Test | Where |
 |---|---|---|
-| 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only |
+| 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only — half of it landed elsewhere on 2026-08-26: the event *fires* on the Modern Standby laptop's Fast Startup shutdown, but it did not drive the OFF, because the display-off had already sent it. "Drives the OFF" still needs a machine where the suspend arrives without a display change in front of it |
 | 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off |
-| 13 | Boot with Fast Startup **enabled** | any machine with hibernate |
+| 13 | Boot with Fast Startup **enabled** | any machine with hibernate — **passed 2026-08-26** on the Modern Standby laptop, `boot type 0x1`. The strongest form of the pass: no service start appears in the log at all, because Fast Startup resumed the same process, and the `ON` happened anyway |
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
