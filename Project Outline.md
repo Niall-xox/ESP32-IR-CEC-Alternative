@@ -975,6 +975,39 @@ genuinely idempotent design, and narrowing the rule to "changes only" would
 reintroduce the failure the reversal removed. Worth revisiting only if the same
 pattern shows up somewhere it costs more than a wasted frame.
 
+### What actually protects playback
+
+Test 17's first half, 2026-08-27: a fullscreen browser video left running for
+**35 minutes** against a 5-minute display timeout. The screen never dimmed, the
+TV stayed on, and the daemon logged **nothing at all** — its last line is from
+before the video started. That is the pass, and the mechanism behind it was
+captured while it was still running rather than inferred afterwards:
+
+```
+DISPLAY:
+[PROCESS] \Device\HarddiskVolume3\Program Files\Mozilla Firefox\firefox.exe
+display request
+```
+
+**The daemon has no part in this and cannot.** It does not know a video is
+playing, has no concept of an application, and would switch the TV off if the
+screen blanked. What prevented that was Firefox asserting a `DISPLAY` power
+request and Windows honouring it, which is the entire protection the display-off
+policy leans on.
+
+That is worth stating plainly because it relocates the risk. The policy is
+sound *conditional on applications declaring themselves*, and that condition is
+owned by third-party software rather than by anything in this repository. A
+media application that declares its request correctly is protected completely; a
+game or a player that does not is not protected at all, and the daemon cannot
+tell the two apart — from where it sits, an undeclared video and an idle desktop
+are the same screen going dark.
+
+The remaining half of test 17 is exactly that case: a controller-driven game,
+where gamepad input does not reset the display idle timer the way a mouse does,
+so the request is the *only* thing standing between the player and a TV
+switching off mid-session.
+
 ### Where the implementation departs from the plan
 
 Seven things came out differently once the code was written. Recorded because a
@@ -1849,7 +1882,7 @@ three separate sessions comparable afterwards.
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine — **passed 2026-08-26** on the Modern Standby laptop (`boot type 0x2`), but *not as described*: the device never re-enumerated and the arrival re-assert never ran. See [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified) |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
-| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Blocked until a screen timeout exists**: the test laptop is set to never blank, so there is no timeout to run past. Set `VIDEOIDLE` to a few minutes first, or the row cannot be answered either way |
+| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Video half passed 2026-08-27**: 35 minutes fullscreen against a 5-minute timeout, no dim, no blank, nothing logged, and Firefox's `DISPLAY` request captured live. **The game half is still open**, and it is the one that can fail — see [what actually protects playback](#what-actually-protects-playback) |
 
 Test 15 is not a formality: it is the one the
 [largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
