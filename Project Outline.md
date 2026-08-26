@@ -55,15 +55,23 @@ sleep/wake/shutdown/boot cycle have all been exercised against the real device
 and daemon. Two items remain untested, neither on the power-sync path — see
 [Still unverified on hardware](#still-unverified-on-hardware).
 
-**Windows — paused mid-bring-up 2026-08-24.** The daemon builds and the device
-answers, and the first run uncovered a real firmware defect: the ESP32 does not
-resume from a USB suspend. Fixed in firmware but **not yet flashed**, and the
-service has never been installed, so the Windows half is unverified end to end.
-Pick it up at [Resume here](#resume-here).
+**Windows — implemented for all three power models 2026-08-26, none of it run.**
+The daemon builds and links, and one binary now covers classic S3, hibernate
+(S4) and Modern Standby (S0 low power idle). It reports which of the three the
+machine is at startup, reacts to the ESP32 arriving and leaving, and measures
+how much of a suspend's grace period each send actually consumed. The service
+has still never been installed, so every runtime assumption in it remains
+unproven. Pick it up at [Resume here](#resume-here).
 
-That defect is not Windows-specific. It reaches Linux too — the running daemon
-holds the device open continuously, which is the only reason an idle suspend
-never happens there. Re-verify Linux after flashing.
+**Firmware flashed 2026-08-26, and Linux re-verified on it.** A full S3
+sleep/wake cycle behaves exactly as it did before — see
+[the second-pass table](#verified-on-hardware--second-pass).
+
+The USB suspend recovery did **not** fire during that cycle, which the previous
+version of this brief predicted it would. The prediction was wrong and the
+reason is worth keeping: see
+[what Linux actually did](#what-linux-actually-does-across-a-suspend). The fix
+therefore remains unexercised on either platform.
 
 **Three things block any public release:**
 
@@ -481,9 +489,13 @@ daemon/
     IPowerMonitor.h              (abstract: sleep/wake/shutdown callbacks + run())
     HIDTransport.h / .cpp        (USB HID, sequence-correlated, budgeted)
     LinuxPowerMonitor.h / .cpp   (logind over D-Bus, inhibitor lock)
-    WindowsPowerMonitor.h / .cpp (Win32 Service API — incomplete)
+    WindowsPowerMonitor.h / .cpp (Win32 Service API — display state, device events)
+    WindowsPowerCapabilities.h / .cpp
+                                 (which of the three power models this machine is)
   packaging/
     postinst / prerm             (deb + rpm)
+    windows/install-service.ps1  (service install, upgrade and removal)
+    windows/verify-windows.ps1   (per-machine verification report)
     PKGBUILD / *.install         (Arch)
   archive/
     SerialTransport.h / .cpp     (USB CDC — not compiled, for non-HID boards)
@@ -500,77 +512,92 @@ daemon/
 
 ## Windows — in progress
 
-The current focus. **Written and building on Windows; the service has never been
-installed.** Work paused 2026-08-24 — [resume here](#resume-here).
+The current focus. **Written, building and complete for all three power models;
+the service has never been installed.** Last worked on 2026-08-26 —
+[resume here](#resume-here).
 
 ### Where it stands
 
 | | State |
 |---|---|
-| Windows build | **Works.** Builds under MSVC via vcpkg. The first time these sources have ever been compiled by a Windows toolchain. |
-| Device reachable | **Verified.** `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
-| USB suspend defect | **Found, root-caused, fixed in firmware — not yet flashed.** See [USB suspend](#usb-suspend--the-defect-the-windows-build-found). |
+| Windows build | **Works.** Builds under MSVC via vcpkg, and cross-compiles clean under `-Wall -Wextra` for x86_64-w64-mingw32, linking a complete PE. |
+| Device reachable | **Verified 2026-08-24.** `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
+| S3 suspend | **Written.** `PBT_APMSUSPEND` → OFF, `PBT_APMRESUMESUSPEND` → ON. Never run — the 2026-08-24 test machine has no S3 in firmware. |
+| Hibernate (S4) | **Written.** Windows announces hibernate through the same `PBT_APMSUSPEND`, so it needs no separate branch; the resume side is the same two events. Never run. |
+| Modern Standby | **Written.** Display state is the only signal that fires on S0ix, and it is the primary trigger for that reason. Never run as a service. |
+| Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
+| Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
+| Grace-period measurement | **New 2026-08-26.** Each suspend send reports how many of its budgeted milliseconds it used. |
+| USB suspend defect | **Fixed in firmware, flashed 2026-08-26, still unexercised.** Linux does not trigger the recovery path — see [below](#what-linux-actually-does-across-a-suspend). |
 | Service | **Never installed.** Everything below the console check is untested. |
 | Display-state design | **Unanswered.** Whether registration reports the current value — the assumption the boot `ON` rests on — needs the service running to find out. |
-| Linux | Unaffected so far, but the firmware has changed underneath it and wants re-verifying after the flash. |
 
 `WindowsPowerMonitor.*` was rewritten against the design in this section. It
 compiles clean under `-Wall -Wextra` via an x86_64-w64-mingw32 cross-compile and
-links as a complete PE, which is a syntax, type and symbol check — **not**
-evidence that any of it behaves correctly. Every runtime assumption in it is
-still unproven.
+links as a complete PE with every import resolving — `CallNtPowerInformation`
+from `POWRPROF.dll`, `RegisterDeviceNotificationW` and
+`RegisterPowerSettingNotification` from `USER32.dll`,
+`StartServiceCtrlDispatcherW` from `ADVAPI32.dll`. That is a syntax, type and
+symbol check, and **not** evidence that any of it behaves correctly. Every
+runtime assumption in it is still unproven.
+
+### Three machines, not one
+
+The 2026-08-24 plan was written around a single test machine and treated S3 as
+permanently unverifiable, because that machine reports S1/S2/S3 unavailable *in
+firmware*. That constraint was a property of the machine, not of the work, and
+it no longer holds: there is now hardware covering all three configurations.
+
+So the verification plan below is per-machine rather than per-feature, and the
+thing that makes three days of testing on three machines add up to one record is
+that each machine reports itself identically. `verify-windows.ps1` exists for
+that — it reads the power model, the service configuration, the device state and
+the log, and writes them in a fixed order.
+
+**The daemon says which machine it is, in its own log.** Without that line the
+rest of the log is ambiguous: an absent `PBT_APMSUSPEND` is a defect on an S3
+desktop and the documented behaviour on a Modern Standby laptop, and no amount
+of reading the events tells those apart.
+
+```
+[power] 14:22:31.104 machine power model: classic S3 suspend-to-RAM, hibernate available, Fast Startup on
+[power] 14:22:31.104   S1=no  S2=no  S3=yes  S4=yes
+[power] 14:22:31.104   hiberfil present=yes  Modern Standby (AoAc)=no
+[power] 14:22:31.104   Fast Startup (Hiberboot)=yes
+```
 
 ### Resume here
 
 Ordered, because each step gates the next.
 
-1. **Flash the firmware.** The USB suspend fix is committed and builds but has
-   never run. Manual bootloader entry — hold BOOT, tap RESET, release BOOT —
-   then `cd firmware && pio run -t upload`, and power-cycle to leave download
-   mode. The filesystem is unchanged, so no `uploadfs`.
+1. **Build on Windows** and run `--console` to confirm the device still answers
+   after the 2026-08-26 flash. Note anything MSVC `/W4` reports — the tree is
+   clean under gcc's `-Wall -Wextra`, which is not the same set.
 
-2. **Re-verify Linux.** The firmware changed under a platform that was already
-   verified. A sleep/wake cycle and a look at the journal is enough; the
-   re-enumeration on resume is new behaviour that Linux will now also see.
+2. **Install the service** on whichever machine is nearest, elevated, with the
+   ESP32 plugged in first. The installer now prints the opening log lines when
+   it finishes, which answers two things at once: which power model the machine
+   is, and whether display-state registration delivered a value.
 
-3. **Rebuild on Windows and check the console path still works.** Confirms the
-   flash did not break what already worked. Note whether MSVC `/W4` reports
-   anything — the tree is clean under gcc's `-Wall -Wextra`, which is not the
-   same set, and that has not been checked.
+   `display state = on` at registration means the boot `ON` works as designed.
+   `no display state reported at registration` means the fallback is carrying
+   it, and the way the opening state is read needs rethinking.
 
-4. **Install the service** — elevated, with the ESP32 plugged in first, per
-   [the Windows build steps](#windows). Then read the first twenty lines of
-   `C:\ProgramData\ESP32IRRemote\daemon.log`.
+3. **Work through the verification table** on that machine, then run
+   `verify-windows.ps1` and keep the report.
 
-   This answers the display-state question. `[power] ... display state = on` at
-   registration means the boot `ON` works as designed. `no display state
-   reported at registration` means the fallback is carrying it, and the way the
-   opening state is read needs rethinking.
+4. **Repeat on the other two**, so each of S3, hibernate and Modern Standby is
+   covered by a machine that actually implements it.
 
-5. **The standby cycle** — the largest open risk, and the one thing the
-   firmware fix has not been shown to survive. Three outcomes to tell apart, in
-   [the risks below](#risks-to-check-on-the-real-machine).
-
-6. **Then the verification plan**, which nothing has yet touched.
+5. **The standby cycle** remains the largest single risk, and the one thing the
+   firmware fix still has not been shown to survive. Three outcomes to tell
+   apart, in [the risks below](#risks-to-check-on-the-real-machine).
 
 Not on this list and still open from before any of it: the release guard on
 `v*` tags, and the registered VID/PID.
 
-The previous `WindowsPowerMonitor.*` was written to prove the `IPowerMonitor`
-boundary held, not to work. It had never been built or executed, and it predated
-both fix 1 and the sequenced protocol. It has been replaced rather than edited,
-for the reason in the decisions table: its comments asserted things that were
-false, and wrong comments outlive wrong code.
-
 An earlier version of this brief claimed Windows was "confirmed working". That
 was a typo and is not true — recorded here so the claim does not resurface.
-
-An earlier version of *this plan* was written against a single Windows
-configuration — a classic S3 desktop with Fast Startup disabled — and would have
-failed on the two that are more common, in both cases by reporting a plausible
-wrong reason rather than an error. See
-[Windows is three configurations](#windows-is-three-configurations-not-one).
-
 ### Where the implementation departs from the plan
 
 Six things came out differently once the code was written. Recorded because a
@@ -584,6 +611,55 @@ plan that silently stopped matching its implementation is worse than no plan.
 | **Preshutdown timeout** | Set by the installer as the `PreshutdownTimeout` registry value, which is what `ChangeServiceConfig2` writes anyway, rather than by the service to itself at startup. It is install-time configuration and belongs with the rest of it. |
 | **`GUID_CONSOLE_DISPLAY_STATE`** | Spelled out in the source rather than taken from the SDK, which declares the power-setting GUIDs but leaves their definitions in a library whose name varies by SDK version. One line, and one fewer link-time question. |
 | **A third conditional in `main.cpp`** | The startup `ON` block is now inside `#ifdef __linux__`, against the stated end-state of exactly one. The honest alternative was a `justBooted()` on `IPowerMonitor` that Windows answers "never" — machinery to avoid a two-line guard. Noted rather than hidden. |
+
+### Completing the three power models — 2026-08-26
+
+The 2026-08-24 code already covered all three configurations behaviourally: one
+display-state mechanism, with the suspend and resume events as secondary
+triggers. What it could not do was tell anyone *which* configuration had
+produced a given log, or notice the device it talks to coming and going. Both
+matter now that the testing spans three machines.
+
+| Added | Why |
+|---|---|
+| **Power capability report at startup** | `CallNtPowerInformation(SystemPowerCapabilities)` read once and logged. Without it a log is ambiguous: an absent `PBT_APMSUSPEND` is a defect on an S3 desktop and correct on a Modern Standby laptop. |
+| **Device arrival and removal** | `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. A removal invalidates the transport's handle deliberately; an arrival re-asserts the current display state. |
+| **`PBT_APMRESUMECRITICAL`** | Resume after an unannounced power loss — an emergency hibernate on a dying battery. Deprecated and still delivered, so it is named rather than logged as an unknown event number. Treated like an automatic resume: not evidence anybody is present. |
+| **Grace-period measurement** | Every suspend send reports how many of its budgeted milliseconds it used. The ~2s is guidance, not a contract, and this is the only way to learn what a given machine actually allows. |
+| **Away-time reporting** | Wall-clock elapsed across a suspend, so a brief Modern Standby dip and an overnight hibernate stop looking identical in the log. |
+| **Idempotent installer** | Re-running it is an upgrade: the running service is stopped and deleted, with a poll for the deletion to land, before the new one is created. An installer that only works on a clean machine stops working on the second attempt, which is exactly when it is needed. |
+| **`verify-windows.ps1`** | Captures power model, service configuration, device state, selective-suspend values and the log tail into one report. What makes three sessions on three machines into one record. |
+
+**Why the device notifications are worth the code.** They land on the path the
+brief calls the largest open risk. The firmware re-enumerates itself after a USB
+suspend, so a wake `ON` issued while the device is still coming back fails —
+and the arrival a second later is what retries it. Without that, the TV stays
+wrong until the next power event, which could be hours. The removal half is
+smaller but not nothing: it makes the log say *why* the handle was dropped, on
+the one path where a device vanishing and returning is routine.
+
+Both are routed through the worker rather than acted on in the handler.
+`HIDTransport` is single-threaded by design and holds no lock; the handler runs
+on an SCM thread. Touching the transport from there would break the invariant
+the worker exists to maintain — so the handler records and returns, exactly as
+it does for power events.
+
+**`SYSTEM_POWER_CAPABILITIES` is declared in full rather than included.** The
+two fields that matter most — `AoAc`, which is how a machine says it is Modern
+Standby, and `Hiberboot`, which is Fast Startup — were appended by Microsoft
+into bytes the older struct reserved as spare. A current SDK declares them;
+mingw-w64's `winnt.h` does not. Depending on the header would mean the capability
+report existing or not according to which toolchain compiled it, and going
+missing precisely on the cross-build nobody watches. The layout is documented
+and stable, so it is written out once with a `static_assert` guarding against a
+future SDK growing past it.
+
+**Event Log is still deliberately not done.** It is the idiomatic Windows
+answer and it stays on the list rather than in the code, for the reason already
+recorded under [Logging](#logging--decided): it needs a registered event source,
+a message resource DLL, and a logging abstraction spanning both platforms, and
+its benefits accrue to administrators managing machines they did not build.
+That is still not the situation. Get the three power models verified first.
 
 ### What needs no work at all
 
@@ -909,9 +985,11 @@ carrying an older value. Correct whichever way the clock behaves.
 
 ### Risks to check on the real machine
 
-- ~~**Which configuration this machine is.**~~ Answered 2026-08-24: Modern
-  Standby, Fast Startup on, S3 absent in firmware. See
-  [what can be verified](#what-can-be-verified-without-a-second-machine).
+- ~~**Which configuration this machine is.**~~ No longer a question anyone has
+  to answer by hand: the daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and
+  logs it. The 2026-08-24 laptop is Modern Standby, Fast Startup on, S3 absent
+  in firmware; other machines now cover the rest. See
+  [what each machine can prove](#what-each-machine-can-and-cannot-prove).
 - **Spurious resumes during DRIPS.** A Modern Standby machine cycles in and out
   of the low-power state. If `PBT_APMRESUMESUSPEND` is raised on one of those
   exits while the display is still off, an unguarded handler would light the TV
@@ -1031,70 +1109,127 @@ signing already listed as gaps.
 where the bus suspends regardless of any registry setting. That is the case the
 device exists for on a laptop, and it is the next thing to test.
 
-### What can be verified without a second machine
+#### What Linux actually does across a suspend
 
-**The test machine is Modern Standby, with Fast Startup enabled.** `powercfg /a`
-on 2026-08-24 reports "Standby (S0 Low Power Idle) Network Connected",
-"Hibernate" and "Fast Startup" as available, and S1/S2/S3 all unavailable
-because *the system firmware does not support* them.
+**Measured 2026-08-26, on the newly flashed firmware.** The previous version of
+this brief predicted that Linux would now see the re-enumeration too, and told
+the reader to expect it. It does not, and the prediction is left recorded here
+rather than quietly deleted, because the reason it was wrong is the useful part.
 
-Both axes therefore land on the side the original plan did not handle. There is
-no S3 suspend for `PBT_APMSUSPEND` to announce, and Fast Startup means the tick
-count survives a power cycle, so `GetTickCount64()` would have reported every
-boot as a service restart and the TV would never have come on. Display state is
-not merely the better signal on this machine; it is the only one that can work.
+A full `deep` (S3) suspend/resume cycle, 16 seconds, with the daemon running:
 
-The corollary is a permanent limit, not a scheduling one: **S3 cannot be
-verified here at all.** It is disabled in firmware rather than by policy, so no
-setting turns it on. `PBT_APMSUSPEND` as a suspend trigger ships unverified
-until there is a second machine, and the verification record has to say so
-rather than let the passing Modern Standby run stand in for both.
+| Observation | Reading |
+|---|---|
+| No kernel disconnect, reset or re-probe for the device after the initial plug | It stayed enumerated across the whole suspend |
+| `/dev/hidraw10` kept its original timestamp | No new node, so no `tud_disconnect()` / `tud_connect()` |
+| The wake write succeeded on attempt 1, through an fd opened *before* the suspend | The OUT endpoint never wedged |
+| `power/control` = `on`, `runtime_suspended_time` = 0 | The bus has never selective-suspended this device |
 
-S3 and Modern Standby are firmware properties, so one machine can only be one of
-them. That is the real constraint on this work — not the code, which is written
-once for both.
+So the recovery correctly declined to fire: the firmware only re-enumerates
+after a suspend it actually observed, and it observed none. What this cycle
+demonstrates is that the fix causes **no regression** on Linux — not that it
+works, because nothing asked it to.
 
-The mitigation is that the *logic* is exercisable anywhere. Display-off fires on
-any Windows machine when the monitor idles out, so
-`powercfg /change monitor-timeout-ac 1` and a minute of waiting drives the whole
-path — notification, queue, generation counter, worker, send, ACK — on an S3
-desktop. What genuinely needs Modern Standby hardware is one number: the runway
-between display-off and throttling. That is the same category as the ~2s S3
-figure, and a measurement rather than a design.
+The explanation this brief carried — that Linux escapes the defect because its
+daemon holds the device open continuously — is *consistent* with this but is not
+what was measured. What was measured is `power/control = on`: the kernel is not
+runtime-suspending that port at all, which is a stronger and more specific
+statement than "an open handle keeps it awake".
 
-Whichever model this machine is not, say so in the verification record rather
-than letting it read as covered.
+**The consequence for the Windows work.** The firmware fix and the daemon's
+retry budget are both still entirely unexercised. A Modern Standby cycle is
+where they will first be tested for real, which makes it the largest open risk
+rather than merely the next item.
+
+**A way to exercise it on Linux without waiting for Windows**, since nothing so
+far has: force the selective suspend the firmware is waiting for. The daemon's
+open handle is what keeps the port active, so it has to stop first.
+
+```
+sudo systemctl stop esp32-ir-remote
+echo auto | sudo tee /sys/bus/usb/devices/<port>/power/control
+sleep 4; cat /sys/bus/usb/devices/<port>/power/runtime_status   # expect: suspended
+echo on   | sudo tee /sys/bus/usb/devices/<port>/power/control
+```
+
+If the fix works, the resume produces a new `hidraw` node and a kernel
+disconnect/connect pair. If it does not, the suspend event is not reaching the
+handler — which is a firmware finding, and far cheaper to chase here than on
+Windows.
+
+### What each machine can and cannot prove
+
+**The sleep model is a property of the platform firmware.** A machine supports
+either classic S3 or Modern Standby, never both, and no setting switches it. So
+a single machine can only ever be evidence for one of them, and the 2026-08-24
+test laptop — which reports S1/S2/S3 unavailable *in firmware*, with Fast
+Startup on — could only ever be evidence for Modern Standby.
+
+That was recorded here as a permanent limit. It was a limit of the hardware to
+hand rather than of the work, and it has lifted: there is now hardware covering
+S3, hibernate and Modern Standby.
+
+What this means in practice:
+
+| Configuration | What only that machine can prove |
+|---|---|
+| **S3, Fast Startup off** | `PBT_APMSUSPEND` as a real suspend trigger; a true cold boot, and therefore the only honest test of the boot `ON` |
+| **S3 or S4, Fast Startup on** | That the boot `ON` survives a hibernated kernel session — the case the uptime gate could never have handled |
+| **Hibernate (S4)** | That a resume after full power loss to the device re-establishes the transport. The ESP32 *will* have re-enumerated, so this is the cheapest real test of the device-arrival path |
+| **Modern Standby** | The DRIPS cycle, the display-state signal in its native habitat, and whether the firmware's USB recovery survives a bus suspend that no registry setting prevents |
+
+Two things remain measurements rather than pass/fail, and both need the real
+hardware:
+
+- **The suspend grace period.** Microsoft's ~2s is guidance, not a contract. The
+  daemon now measures and logs what each send actually used, so this is read off
+  the log rather than assumed.
+- **The Modern Standby runway** between display-off and the Desktop Activity
+  Moderator throttling a session-0 service. Same category, same method.
+
+Whichever model a given log came from, the daemon's own opening line now says
+so, so a report cannot silently be filed against the wrong configuration.
 
 ### Verification plan
 
 Mirror what was done on Linux, since that is what "up to standard" means here.
-**Nothing below has been run.** Tick these off in the brief as they pass, the
-way the Linux second pass was recorded, so the record is a record rather than a
-memory.
+**Nothing below has been run.** Tick these off as they pass, the way the Linux
+second pass was recorded, so the record is a record rather than a memory.
 
-| | Test | Done |
+Run `verify-windows.ps1` on each machine first: it captures the power model,
+service configuration, device state and log in one file, which is what makes
+three separate sessions comparable afterwards.
+
+**Per machine — every machine:**
+
+| | Test | S3 box | S4 box | Modern Standby |
+|---|---|---|---|---|
+| 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24 |
+| 2 | Service installs, starts, and logs its power model correctly | no | no | no |
+| 3 | Idle screen blank turns the TV off; display returning turns it on | no | no | no |
+| 4 | Sleep and wake, user-initiated | no | no | no |
+| 5 | Shutdown, then boot | no | no | no |
+| 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | no |
+| 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | no |
+| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | no |
+| 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | no |
+| 10 | Unconfigured profile answering `ERR` | no | no | no |
+
+**Configuration-specific — only the machine that has it can answer:**
+
+| | Test | Where |
 |---|---|---|
-| 1 | Device reachable — `--console` sends `ON`, gets the ACK | **yes**, 2026-08-24 |
-| 2 | Sleep and wake, user-initiated | no |
-| 3 | Wake that is *automatic* — a scheduled wake or Wake-on-LAN | no |
-| 4 | An unattended maintenance wake leaving the TV **off** — the new behaviour, and the one most easily got wrong | no |
-| 5 | Shutdown and boot with Fast Startup **enabled** | no |
-| 6 | Shutdown and boot with Fast Startup **disabled** — only this one is a true cold boot | no |
-| 7 | Idle screen blank turning the TV off, and the display returning turning it on | no |
-| 8 | Service restart with the display on: `ON` re-asserted, TV already on, no visible change | no |
-| 9 | Unconfigured profile answering `ERR` | no |
-| 10 | Graceful behaviour with the ESP32 unplugged | no |
-| 11 | A hand-run copy refusing to start while the service holds the mutex | no |
-| 12 | A full Modern Standby cycle with the firmware USB fix in place | no |
+| 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only |
+| 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off |
+| 13 | Boot with Fast Startup **enabled** | any machine with hibernate |
+| 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
+| 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only |
+| 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set |
 
-Test 12 is not a formality: it is the one the
-[largest open risk](#risks-to-check-on-the-real-machine) turns on. Tests 2, 3
-and 4 cannot be separated on this machine from the display-state behaviour they
-depend on, so read the `[power]` lines alongside each.
-
-`PBT_APMSUSPEND` as a suspend trigger cannot be tested here at all — S3 is
-absent in this machine's firmware. Record that as untested rather than letting
-a passing Modern Standby run stand in for it.
+Test 15 is not a formality: it is the one the
+[largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
+the one most easily got wrong, because getting it wrong looks like nothing
+happening.
 
 ### Gaps against a genuinely commercial Windows product
 
@@ -1104,11 +1239,12 @@ rather than discovered later.
 
 | Gap | Notes |
 |---|---|
-| **Code signing** | Unsigned binaries and installers trigger SmartScreen warnings, and many corporate environments refuse them outright. A commercial Windows product signs both. Needs a certificate — a real cost, and a lead time. Nothing in the plan currently mentions it. |
-| **Device arrival / removal notification** | Both platforms currently discover a missing ESP32 by *failing a write* and then reopening. Windows offers `SERVICE_CONTROL_DEVICEEVENT` via `RegisterDeviceNotification`, and Linux has udev monitoring. Reacting to a plug event beats retrying blindly, and it is the more idiomatic Windows design. A symmetric gap, not a Windows-only one. |
-| **Installer scope** | An MSI has to do more than register the service: upgrade in place, stop the service before replacing the binary, uninstall cleanly, remove its directories, and set the ACL on the log directory. "MSI at first release" understates this. |
-| **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. "Restart on failure, 5s" specifies one of those. A commercial service decides all of them, including whether to stop retrying eventually. |
-| **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across two sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. |
+| **Code signing** | Unsigned binaries and installers trigger SmartScreen warnings, and many corporate environments refuse them outright. A commercial Windows product signs both. Needs a certificate — a real cost, and a lead time. |
+| **Windows Event Log** | The daemon logs to a file. The idiomatic Windows answer is the Event Log, so failures surface in Event Viewer where an administrator already looks. Deliberately deferred — it needs a registered event source, a message resource DLL and a logging abstraction spanning both platforms, and its benefits accrue to administrators managing machines they did not build. Revisit once the three power models are verified. |
+| **Device notification on Linux** | ~~Both platforms~~ — Windows now reacts to `SERVICE_CONTROL_DEVICEEVENT`, added 2026-08-26. Linux still discovers a missing ESP32 only by failing a write and reopening; udev monitoring is the equivalent. The gap is now one-sided rather than symmetric. |
+| **Installer scope** | Partly closed 2026-08-26: `install-service.ps1` now upgrades in place, stops and removes the running service first, cleans up its registry values on uninstall, and sets the log ACL. Still not an MSI — no per-user upgrade path, no rollback, no Add/Remove Programs entry, and it needs an execution-policy bypass to run at all. |
+| **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. The installer sets restart/5s three times with a one-day reset, which specifies all of them — but the decision of whether to *stop* retrying eventually is still unmade, and restarting forever is a choice by default rather than by intent. |
+| **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across three sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. This is the largest single gap on the list. |
 
 ---
 
@@ -1465,10 +1601,16 @@ Two ways out, neither done:
 
 ### Windows implementation
 
-Not listed here. The Windows daemon has never been built or run, so its defects
-are a work plan rather than a backlog — they live in
-[Windows — in progress](#windows--in-progress), together with the changes needed
-outside `WindowsPowerMonitor.*` and the open decisions that block starting.
+Not listed here, and for a narrower reason than before. The Windows daemon now
+builds, links and covers all three power models, but it **has never run as a
+service** — so what would otherwise be a defect backlog is still a list of
+unverified assumptions rather than observed failures. They live in
+[Windows — in progress](#windows--in-progress), alongside the
+[verification plan](#verification-plan) that has yet to be started.
+
+Listing guesses here as though they were defects would put the two kinds of
+claim in the same table, which is the habit the
+[Invariants](#invariants) section exists to break.
 
 ### Process
 
@@ -1493,6 +1635,31 @@ exercised against the real daemon on NixOS:
 | Boot | `ON sent and ACK received (startup)` on a real boot |
 | Uptime gate | `ON skipped — service restarted on an already-running system` on `systemctl restart`, and the ON above on a genuine boot — proven both ways |
 | Unconfigured profile guard | Samsung selected (codes still `0x0`): OLED showed `Not Configured` and nothing was transmitted, rather than a meaningless frame answered with `ACK` |
+
+#### Re-verified after the 2026-08-26 flash
+
+The firmware changed underneath a platform that had already been verified, so
+the sleep and wake rows above were re-run on the new build. Both behave exactly
+as before:
+
+```
+13:41:41  [event] Going to sleep
+13:41:41  [transport] HID device opened (VID=1234 PID=5678)
+13:41:41  [cmd] OFF sent and ACK received (sleep)
+13:41:41  [inhibitor] Lock released
+13:41:58  [event] Woke up
+13:41:58  [cmd] ON sent and ACK received (wake)
+13:41:58  [inhibitor] Lock acquired
+```
+
+Worth noting in its own right: the lazy open at 13:41:41 succeeded on a device
+that had been idle since 13:39, and the wake write went through that same
+descriptor on its first attempt. No regression from either the firmware change
+or the daemon's new retry budget.
+
+What did **not** happen is covered under
+[what Linux actually does across a suspend](#what-linux-actually-does-across-a-suspend).
+
 
 ### Still unverified on hardware
 
