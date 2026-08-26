@@ -730,12 +730,19 @@ distance between the two was four defects wide.
 
 ### What the Modern Standby cycles actually showed
 
-Three real cycles happened on 2026-08-26 without anybody arranging them, and
+Three real cycles happened on 2026-08-26 in the course of ordinary use, and
 Windows' own `Kernel-Power` events date them exactly: standby at 19:20:22 for two
 minutes, again at 19:22:54 for **4h11m**, with a self-initiated maintenance wake
 at 21:15:54 in the middle of it. This is test 15 — the brief's largest open risk
 — run three times in its native habitat, and it passed. It also answered several
 things that were not being asked.
+
+The entries were user-initiated rather than idle: this laptop has `VIDEOIDLE`
+and `STANDBYIDLE` both set to 0, so it never blanks or sleeps on its own. That
+makes these test 4 rather than test 3b, and it leaves 3b and 17 unanswerable on
+this machine until a screen timeout is configured — worth noticing, because a
+machine that never blanks cannot exercise the one policy this platform's
+display-off decision was written for.
 
 **The ESP32 disappears across Modern Standby, and disabling selective suspend
 does not prevent it.** The device was removed 3 seconds after the display went
@@ -1661,8 +1668,8 @@ three separate sessions comparable afterwards.
 | 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24, again 2026-08-26 |
 | 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | **yes**, 2026-08-26 |
 | 3 | Display returning turns the TV on | no | no | **yes**, 2026-08-26 — three times, on real resumes |
-| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **yes**, 2026-08-26 — `OFF sent and ACK received (display off)`, which is the right outcome against this machine's policy line |
-| 4 | Sleep and wake, user-initiated | no | no | not as written — three *idle-initiated* Modern Standby cycles passed; nobody has pressed Sleep |
+| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **not yet possible** — this laptop has both `VIDEOIDLE` and `STANDBYIDLE` set to 0 (never), so it does not blank or sleep on idle at all. Needs a timeout configured before the row means anything |
+| 4 | Sleep and wake, user-initiated | no | no | **yes**, 2026-08-26 — three cycles, `OFF sent and ACK received (display off)` going down and `ON` on the way back |
 | 5 | Shutdown, then boot | no | no | no |
 | 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
 | 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
@@ -1680,7 +1687,7 @@ three separate sessions comparable afterwards.
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
-| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF |
+| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Blocked until a screen timeout exists**: the test laptop is set to never blank, so there is no timeout to run past. Set `VIDEOIDLE` to a few minutes first, or the row cannot be answered either way |
 
 Test 15 is not a formality: it is the one the
 [largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
