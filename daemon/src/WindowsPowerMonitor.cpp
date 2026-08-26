@@ -554,12 +554,31 @@ void WindowsPowerMonitor::workerLoop() {
             return pendingOn_.has_value() || shutdownRequested_ || stopRequested_ || deviceGone_;
         });
         if (!arrived) {
-            // Documented fallback: assume the display is on. Wrong only for a
-            // service restart that happens while the display is off, and the
-            // next display-state change corrects it either way.
-            plog("no display state reported at registration — assuming display on");
-            pendingOn_  = true;
-            pendingWhy_ = Trigger::Startup;
+            // Nothing is asserted. This used to assume the display was on, on
+            // the grounds that it would be wrong only for a service restart
+            // happening while the display was off — but that is precisely the
+            // 3am case the whole design exists to avoid, and the installer
+            // configures restart-on-failure, so an unattended restart is a
+            // configured behaviour rather than a hypothetical.
+            //
+            // The asymmetry that guards PBT_APMRESUMESUSPEND applies here with
+            // equal force: a spurious OFF is corrected by the next display-on
+            // notification, while a spurious ON leaves a lit TV in a dark room
+            // until somebody notices. Given a choice between missing an ON the
+            // user can undo with their own remote, and asserting one nobody
+            // asked for, the first is the smaller failure.
+            //
+            // The cost is real and worth naming: on a machine where the initial
+            // value genuinely never arrives, the TV is not driven until the
+            // first display-state *transition*. Reaching this line at all means
+            // the assumption the boot ON rests on is false on this machine, so
+            // it is a diagnostic rather than a mode to run in — which is why it
+            // is logged this loudly.
+            plog("no display state reported at registration — opening state "
+                 "UNKNOWN, asserting nothing");
+            plog("  the TV will be driven from the first display-state change");
+            plog("  if this line appears on a normal boot, the boot ON needs "
+                 "rethinking — see the brief");
         }
     }
 
@@ -594,16 +613,29 @@ void WindowsPowerMonitor::workerLoop() {
 
         // Before any send: the whole point of the notification is that the
         // handle a send would use is already dead.
-        if (doInvalidate && onDeviceChange_) {
-            try { onDeviceChange_(false); } catch (...) {}
+        if (doInvalidate) {
+            if (onDeviceChange_) {
+                try { onDeviceChange_(false); } catch (...) {}
+            }
+
+            // What the TV is doing is now unknown, and must not be remembered.
+            //
+            // While the device is gone the daemon has no channel to the TV at
+            // all, so anything could have happened to it — most obviously
+            // somebody using the TV's own remote, which is why they unplugged
+            // the ESP32 in the first place. Keeping lastAsserted_ across that
+            // gap means the arrival re-assert is suppressed as redundant
+            // against a state nobody has been in a position to observe, and the
+            // TV stays wrong until the next power event.
+            lastAsserted_.reset();
         }
 
         if (doShutdown) {
-            // Shutdown sends unconditionally, where a display or suspend event
-            // would be skipped as redundant. It is the last chance to leave the
-            // TV in the right state, and preshutdown gives minutes rather than
-            // the two seconds a suspend does, so the repeat costs nothing worth
-            // saving.
+            // Shutdown sends unconditionally, where a suspend would be skipped
+            // as redundant. It is the last chance to leave the TV in the right
+            // state — nothing runs afterwards to correct it — and preshutdown
+            // gives minutes rather than the two seconds a suspend does, so the
+            // repeat costs nothing worth saving.
             std::cout << "[event] Shutting down\n";
             reportPending();
             if (onShutdown_) {
@@ -616,9 +648,26 @@ void WindowsPowerMonitor::workerLoop() {
         if (want.has_value()) {
             const bool on = *want;
 
-            if (lastAsserted_.has_value() && *lastAsserted_ == on) {
+            // Suppressing a repeat is an optimisation with a cost, so it is
+            // applied only where it buys something.
+            //
+            // The reason it exists is the suspend grace period: the machine
+            // goes down about two seconds after announcing it, and two IR
+            // transmissions do not fit comfortably in that. Nowhere else is
+            // under time pressure.
+            //
+            // Everywhere else it is actively harmful, because it argues against
+            // the reason the IR codes are discrete rather than toggle. Discrete
+            // codes were chosen so the TV reaches the right state regardless of
+            // prior drift — and drift is exactly what happens when somebody
+            // picks up the TV's own remote. Re-asserting a state the TV is
+            // already in is a no-op at the TV; re-asserting one it has drifted
+            // out of is the repair. Skipping the send throws the repair away to
+            // save time that, outside a suspend, nothing is asking for.
+            const bool redundant = lastAsserted_.has_value() && *lastAsserted_ == on;
+            if (redundant && why == Trigger::Suspend) {
                 plog(std::string("TV already ") + (on ? "on" : "off")
-                     + " — no command sent");
+                     + " — no command sent (inside the suspend grace period)");
             } else {
                 // Name the actual cause. Reusing "Going to sleep" for a screen
                 // that merely blanked would put a plausible lie in the log,

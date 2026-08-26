@@ -22,6 +22,20 @@ static constexpr size_t REPORT_SIZE = 64;
 // every step from one budget under the limit makes that impossible to hit.
 static constexpr auto SEND_BUDGET = std::chrono::milliseconds(4000);
 
+// The most any caller may ask for, however much time it believes it has.
+//
+// SEND_BUDGET is the default for a caller that states no limit of its own — it
+// is sized against logind's InhibitDelayMaxSec, which is the tightest window
+// this transport runs inside. It is not a ceiling, because it is not the
+// tightest window *every* caller runs inside: Windows preshutdown allows
+// minutes, and capping a shutdown at four seconds throws away the headroom on
+// the one path that has no second chance to leave the TV right.
+//
+// This is the backstop instead. It exists so a wrong budget cannot hang a
+// shutdown indefinitely, not to express any platform's real limit — every
+// caller's own number is far below it.
+static constexpr auto MAX_SEND_BUDGET = std::chrono::seconds(60);
+
 // Longest wait for a reply, further clamped to whatever is left of the budget.
 static constexpr auto ACK_TIMEOUT = std::chrono::milliseconds(2000);
 
@@ -243,14 +257,25 @@ uint8_t HIDTransport::nextSequence() {
 }
 
 bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget) {
-    // Zero means the caller has no limit of its own. Anything larger than
-    // SEND_BUDGET is clamped: a caller may tell us it has *less* time than the
-    // default, never more, because the default is what keeps this call inside
-    // logind's InhibitDelayMaxSec. Clamping rather than trusting the caller is
-    // what stops the budget invariant from depending on every call site.
+    // Zero means the caller has no limit of its own and gets SEND_BUDGET.
+    //
+    // A stated budget is honoured as given, in both directions, because it is
+    // the caller — not this transport — that knows how long its OS will wait.
+    // Linux states nothing and gets the 4s sized against logind; Windows states
+    // ~1.5s for a suspend it cannot delay, and tens of seconds for a shutdown
+    // that preshutdown allows minutes for.
+    //
+    // This used to clamp down to SEND_BUDGET on the reasoning that a caller may
+    // ask for less but never more. That kept one platform's limit as every
+    // platform's ceiling, and silently capped the Windows shutdown — the one
+    // send with real headroom and no retry after it — at four seconds. Only
+    // MAX_SEND_BUDGET bounds it now, and that is a backstop against a bug, not
+    // a policy.
     const auto effective = (budget <= std::chrono::milliseconds::zero())
                                ? SEND_BUDGET
-                               : std::min(budget, SEND_BUDGET);
+                               : std::min(budget,
+                                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              MAX_SEND_BUDGET));
 
     const TimePoint deadline = Clock::now() + effective;
 

@@ -26,10 +26,12 @@
 // shares one wall-clock budget, deliberately smaller than logind's
 // InhibitDelayMaxSec, so it cannot outlive the lock it is holding things up for.
 //
-// A caller that has less time than that — a Windows suspend, where the machine
-// goes down about two seconds after the notification and nothing can delay it —
-// passes a smaller budget. SEND_BUDGET in the .cpp remains the single knob for
-// the default; the parameter only ever tightens it, never loosens it.
+// A caller that knows its own limit passes it, in either direction. A Windows
+// suspend has less — the machine goes down about two seconds after the
+// notification and nothing can delay it. A Windows *shutdown* has far more,
+// because preshutdown allows minutes. SEND_BUDGET in the .cpp is the default
+// for a caller that states nothing, not a ceiling for those that do; only
+// MAX_SEND_BUDGET bounds a stated one, and that is a backstop against a bug.
 //
 // If the device is missing or has been unplugged, send() attempts to reopen it,
 // then logs and returns false rather than throwing — the system still has to be
@@ -42,8 +44,8 @@ public:
     ~HIDTransport() override;
 
     // Returns true only once a matching ACK has been received — see ITransport::send.
-    // A zero budget means "use SEND_BUDGET"; a smaller one is honoured as given,
-    // and a larger one is clamped back down to SEND_BUDGET.
+    // A zero budget means "use SEND_BUDGET"; any stated budget is honoured as
+    // given, bounded only by MAX_SEND_BUDGET.
     bool send(const std::string& cmd,
               std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
 

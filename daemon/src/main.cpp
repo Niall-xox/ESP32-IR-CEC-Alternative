@@ -265,8 +265,16 @@ int main() {
         return report("ON", "wake", transport->send("ON"));
     });
 
+    // Shutdown asks the monitor the same question sleep does, and usually gets
+    // the opposite answer: this is the event a platform waits longest for, and
+    // the last chance to leave the TV right — nothing runs afterwards to correct
+    // it. Linux answers zero and gets the transport's default, which logind's
+    // delay already covers. Windows answers with tens of seconds, because
+    // preshutdown allows minutes and a device that is re-enumerating needs more
+    // than a suspend's worth of patience.
     monitor->setOnShutdown([&]() {
-        return report("OFF", "shutdown", transport->send("OFF"));
+        return report("OFF", "shutdown",
+                      transport->send("OFF", monitor->shutdownBudget()));
     });
 
     // Device presence, where the platform reports it. No platform conditional:

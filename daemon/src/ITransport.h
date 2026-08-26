@@ -26,7 +26,13 @@ public:
     // is a property of the *event* rather than of the transport: it is however
     // long this OS will wait for us before proceeding without us. Zero means
     // "no caller-imposed limit" and the transport applies its own default.
-    // IPowerMonitor supplies the value — see IPowerMonitor::sleepBudget().
+    // IPowerMonitor supplies the value — see sleepBudget() and shutdownBudget().
+    //
+    // A stated budget may be larger or smaller than the transport's default.
+    // The two directions are both real: a Windows suspend cannot be delayed at
+    // all and needs less, while a Windows shutdown is allowed minutes and can
+    // afford far more. Treating the default as a ceiling would make one
+    // platform's tightest window every platform's limit.
     virtual bool send(const std::string& cmd,
                       std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) = 0;
 

@@ -129,6 +129,13 @@ public:
     // transport's default.
     std::chrono::milliseconds sleepBudget() const override { return SLEEP_BUDGET; }
 
+    // Shutdown is the opposite case. SERVICE_ACCEPT_PRESHUTDOWN allows minutes,
+    // and the installer sets PreshutdownTimeout to 60s explicitly, so there is
+    // real headroom here — and no event afterwards to correct a TV left on.
+    // Worth spending when the device is mid-re-enumeration, which is exactly
+    // when four seconds is not enough.
+    std::chrono::milliseconds shutdownBudget() const override { return SHUTDOWN_BUDGET; }
+
     // Called by the static service entry point and control handler, which
     // Windows requires to be plain functions with no captures.
     void serviceMain(DWORD argc, LPWSTR* argv);
@@ -139,6 +146,12 @@ private:
     // two seconds; this is deliberately under that, because overrunning it does
     // not delay the suspend, it just means blocking across one.
     static constexpr auto SLEEP_BUDGET = std::chrono::milliseconds(1500);
+
+    // Well inside the 60s PreshutdownTimeout the installer sets, leaving the
+    // SCM most of its allowance even if this runs to the end. Sized to cover a
+    // device that is re-enumerating — about a second — several times over,
+    // rather than to use everything available.
+    static constexpr auto SHUTDOWN_BUDGET = std::chrono::milliseconds(20000);
 
     // How long the worker waits at startup for the display-state notification
     // that registration should deliver, before falling back to asserting on.

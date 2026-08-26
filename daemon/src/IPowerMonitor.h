@@ -66,5 +66,22 @@ public:
         return std::chrono::milliseconds::zero();
     }
 
+    // The same question for shutdown, where the answer is usually the opposite.
+    //
+    // Sleep is the event a platform may refuse to wait for; shutdown is
+    // generally the one it waits longest for. Windows preshutdown allows
+    // minutes against roughly two seconds for a suspend, and the shutdown OFF
+    // is the last chance to leave the TV in the right state — there is no later
+    // event to correct it. Capping that at the sleep budget, or at the
+    // transport's own default, throws away headroom precisely where it is worth
+    // the most.
+    //
+    // Zero means "no platform limit beyond the transport's own default", which
+    // is Linux's answer: logind gives the same generous delay for both, and the
+    // transport's default is already sized against it.
+    virtual std::chrono::milliseconds shutdownBudget() const {
+        return std::chrono::milliseconds::zero();
+    }
+
     virtual ~IPowerMonitor() = default;
 };
