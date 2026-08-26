@@ -1483,18 +1483,60 @@ Get-Content C:\ProgramData\ESP32IRRemote\daemon.log -Wait -Tail 30 -Encoding UTF
 assumes the ANSI code page and mangles every em-dash. PowerShell 7 defaults to
 UTF-8 and does not need it.
 
+The installer prints the opening log lines when it finishes, which is where the
+capability report and the first display-state reading appear — the two things
+every later step is read against.
+
+**Re-running it is an upgrade.** It stops and removes the existing service
+first, waiting for the deletion to actually land, so reinstalling after a
+rebuild needs no manual cleanup. To remove it:
+
+```powershell
+.\daemon\packaging\windows\install-service.ps1 -Uninstall
+.\daemon\packaging\windows\install-service.ps1 -Uninstall -RemoveLogs
+```
+
+Uninstalling also clears the selective-suspend registry values it wrote, so a
+machine is not left carrying a setting nothing on it explains. The log directory
+survives unless `-RemoveLogs` is given, because an uninstall during testing is
+usually the prelude to a reinstall.
+
+**Capture the machine's state before and after testing it:**
+
+```powershell
+.\daemon\packaging\windows\verify-windows.ps1
+```
+
+It changes nothing. It reads the power model, the service configuration, the
+device state, the selective-suspend values and the log tail, and writes them in
+a fixed order to `%ProgramData%\ESP32IRRemote\verify-<machine>-<stamp>.txt`.
+Run it elevated — the service configuration and the device registry values are
+not readable otherwise, and it says which parts it could not see rather than
+reporting them as absent.
+
+That fixed order is the point: the three configurations are being tested on
+three machines on three different days, and that only adds up to one
+verification record if each machine reports itself the same way.
+
 hidapi comes from vcpkg via `find_package(hidapi CONFIG)`. PkgConfig is not used
 here — it is guarded behind the Linux branch. The vcpkg target is
 `hidapi::winapi` (not `hidapi::hidapi`), and the include path needs the *parent*
 of the vcpkg include directory, derived at configure time via
 `cmake_path(GET ... PARENT_PATH ...)`.
 
-No other libraries are linked. `SHGetKnownFolderPath` was the one call that
-needed them, and it was dropped: `FOLDERID_ProgramData` is declared by the SDK
-but defined in a library whose availability varies by SDK version, which is a
-link error found by linking and never by compiling. The log path reads
+`PowrProf` is linked, for `CallNtPowerInformation` — the call that reports
+whether this machine is S3 or Modern Standby and whether Fast Startup is on. It
+ships with every Windows SDK under a name that has not changed, so it is linked
+normally.
+
+Nothing else is. `SHGetKnownFolderPath` was the one call that would have needed
+another library, and it was dropped: `FOLDERID_ProgramData` is declared by the
+SDK but defined in a library whose availability varies by SDK version, which is
+a link error found by linking and never by compiling. The log path reads
 `%ProgramData%` from the environment instead — a variable every service
-inherits, and not user-redirectable the way per-user known folders are.
+inherits, and not user-redirectable the way per-user known folders are. The
+power-setting and device-interface GUIDs are spelled out in the sources for the
+same reason.
 
 ### Packaging & CI
 
