@@ -57,9 +57,20 @@ LinuxPowerMonitor::~LinuxPowerMonitor() {
     releaseInhibitorLock();
 }
 
-void LinuxPowerMonitor::setOnSleep(std::function<bool()> cb)    { onSleep_    = std::move(cb); }
-void LinuxPowerMonitor::setOnWake(std::function<bool()> cb)     { onWake_     = std::move(cb); }
-void LinuxPowerMonitor::setOnShutdown(std::function<bool()> cb) { onShutdown_ = std::move(cb); }
+void LinuxPowerMonitor::setOnCommand(std::function<bool(const TvCommand&)> cb) {
+    onCommand_ = std::move(cb);
+}
+
+// Every command from this monitor states a zero budget — see the header.
+void LinuxPowerMonitor::assertTv(bool on, const char* reason) {
+    if (!onCommand_) return;
+    try {
+        (void)onCommand_(TvCommand{on, reason, std::chrono::milliseconds::zero()});
+    } catch (...) {
+        // Never propagate: this runs inside a D-Bus signal handler, where an
+        // exception unwinds into the sdbus event loop.
+    }
+}
 
 void LinuxPowerMonitor::run() {
     connection_->enterEventLoop();
@@ -103,13 +114,13 @@ void LinuxPowerMonitor::releaseInhibitorLock() {
 void LinuxPowerMonitor::onPrepareForSleep(bool start) {
     if (start) {
         std::cout << "[event] Going to sleep\n";
-        // Always release the inhibitor lock even if the callback fails (e.g. ESP32
+        // Always release the inhibitor lock even if the command fails (e.g. ESP32
         // not plugged in) — the system must not be blocked from sleeping.
-        try { if (onSleep_) (void)onSleep_(); } catch (...) {}
+        assertTv(false, "sleep");
         releaseInhibitorLock();
     } else {
         std::cout << "[event] Woke up\n";
-        try { if (onWake_) (void)onWake_(); } catch (...) {}
+        assertTv(true, "wake");
         takeInhibitorLock();  // re-take ready for the next sleep event
     }
 }
@@ -117,9 +128,9 @@ void LinuxPowerMonitor::onPrepareForSleep(bool start) {
 void LinuxPowerMonitor::onPrepareForShutdown(bool start) {
     if (start) {
         std::cout << "[event] Shutting down\n";
-        // Always release the inhibitor lock even if the callback fails — the
+        // Always release the inhibitor lock even if the command fails — the
         // system must not be blocked from shutting down.
-        try { if (onShutdown_) (void)onShutdown_(); } catch (...) {}
+        assertTv(false, "shutdown");
         releaseInhibitorLock();
     }
 

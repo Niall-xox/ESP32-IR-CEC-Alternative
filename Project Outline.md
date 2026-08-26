@@ -36,14 +36,23 @@ HDMI-CEC without requiring CEC support on either device.
 | Shutdown               | Turn TV off  |
 | Enter sleep            | Turn TV off  |
 
-**On Windows the screen blanking also turns the TV off**, and the display
-returning turns it back on. That is a deliberate divergence from Linux rather
-than an accident: Modern Standby machines never enter a classic suspend, so
-display state is the only signal that fires on them at all, and it answers "is
-anyone there?" more directly than a sleep state does. A TV lit up showing a
-blanked desktop is not a state anyone wants either. Media playback is unaffected
-— players assert `ES_DISPLAY_REQUIRED`, so the screen does not blank during it.
-See [driving from display state](#driving-from-display-state).
+**On Windows the display coming on also turns the TV on**, on every machine: a
+screen lighting up is the most direct evidence there is that somebody is at the
+PC, and on a Fast Startup machine it is the only route to an ON at boot.
+
+**The screen *blanking* turns the TV off only where nothing else can** — a
+Modern Standby machine, which never enters a classic suspend and so raises no
+usable suspend event. A machine that reports classic S3 gets its OFF from the
+suspend event instead, and an idle screen blank is ignored there, so the
+behaviour matches Linux. The daemon reads which kind of machine it is at startup
+and says so in its log. See
+[driving from display state](#driving-from-display-state).
+
+That split matters because the divergence is not free. On a Modern Standby
+machine the TV switches off when the screen blanks, including under somebody who
+is still sitting there watching something that failed to assert
+`ES_DISPLAY_REQUIRED`. That is a real cost accepted only where the alternative
+is a TV that never switches off at all.
 
 Existing solutions (e.g. Wake-on-LAN, network-based control) are unreliable and
 dependent on network state. This device operates at the USB layer, making it
@@ -71,6 +80,15 @@ machine is at startup, reacts to the ESP32 arriving and leaving, and measures
 how much of a suspend's grace period each send actually consumed. The service
 has still never been installed, so every runtime assumption in it remains
 unproven. Pick it up at [Resume here](#resume-here).
+
+**Reviewed against the project's aims 2026-08-26, and two things changed.** The
+brief had grown detailed enough to be internally consistent while drifting from
+what the [Overview](#overview) table promises. Reading it back against those four
+rows found an idle screen blank turning the TV off on machines that had a better
+signal available, and a screen blank inheriting a suspend's 1500ms deadline
+while nothing was waiting for it. Both are fixed, in the brief and in the code;
+both are Windows-only and remain unrun like the rest of it. The full reasoning is
+under [the reversals](#five-decisions-the-sanity-check-reversed).
 
 **Firmware flashed 2026-08-26, and Linux re-verified on it.** A full S3
 sleep/wake cycle behaves exactly as it did before — see
@@ -457,9 +475,9 @@ make that the common case.
 Two platform-specific concerns sit behind abstract interfaces:
 
 ```
-IPowerMonitor   — raises OnSleep, OnWake, OnShutdown
-                  and OnDeviceChange where the platform reports it;
-                  answers sleepBudget()
+TvCommand       — { bool on; const char* reason; milliseconds budget; }
+IPowerMonitor   — raises OnCommand(TvCommand),
+                  and OnDeviceChange where the platform reports it
 ITransport      — bool send(cmd, budget = 0)
                   void invalidate()
 ```
@@ -467,17 +485,28 @@ ITransport      — bool send(cmd, budget = 0)
 `main.cpp` only ever touches these. Platform implementations are compiled in or
 out by CMake.
 
-The two additions past the original three events are both defaulted, so a
-platform that has no answer for them implements nothing. `sleepBudget()` returns
-zero — "no limit beyond the transport's own default" — and `OnDeviceChange` is
-simply never raised. Linux takes both defaults.
+**One callback, not three.** `OnSleep`, `OnWake` and `OnShutdown` were separate,
+and the send budget came from two extra virtuals on `IPowerMonitor`. That put
+the deadline on an event *class* rather than on the event, and the difference
+stopped being academic the moment Windows began driving the TV from display
+state — see the fifth row of
+[the reversals](#five-decisions-the-sanity-check-reversed). Both the reason and
+the deadline are known only to whatever raised the event, so they travel with it.
+
+`OnDeviceChange` remains defaulted, so a platform with no device notification
+implements nothing and the transport goes on discovering a vanished device by
+failing a write. Linux takes that default. Linux also states a zero budget on
+every command — logind holds the system for `InhibitDelayMaxSec` for sleep and
+shutdown alike, and the transport's default is already sized against it.
 
 | Concern         | Linux                      | Windows                          |
 |-----------------|----------------------------|----------------------------------|
 | Power events    | sdbus-c++ / systemd-logind | Win32 Service API                |
-| Presence signal | *(none — sleep state only)* | console display state           |
+| Presence signal | *(none — sleep state only)* | console display state (ON always; OFF only where no suspend event exists) |
 | Device presence | *(none — reopen on failure)* | `SERVICE_CONTROL_DEVICEEVENT`   |
 | Sleep budget    | 4s, backed by a delay inhibitor | ~1.5s, and nothing can delay a suspend |
+| Display / wake / arrival budget | *(n/a)*     | zero — nothing is waiting, so the transport's own default applies |
+| Shutdown budget | 4s, same delay inhibitor   | 20s, against a 60s preshutdown timeout |
 | HID transport   | hidapi (hidraw backend)    | hidapi (Win32 backend)           |
 | Logging         | stdout → journal           | stdout redirected to a file      |
 | Build system    | CMake                      | CMake                            |
@@ -512,10 +541,12 @@ in [Windows — in progress](#windows--in-progress).
 The `IPowerMonitor` boundary did its job: `ITransport`, `IPowerMonitor` and
 `HIDTransport` carry no platform conditionals. But the original expectation of
 "no changes outside `WindowsPowerMonitor`" was wrong, and stayed wrong — the
-send budget became a parameter on `send()`, the transport gained
-`invalidate()`, and the monitor interface gained a device-presence callback.
-Each is defaulted so Linux is untouched, which is the shape the boundary was
-supposed to allow and did.
+send budget became a parameter on `send()`, the transport gained `invalidate()`,
+the monitor interface gained a device-presence callback, and the three power
+callbacks eventually collapsed into one carrying a `TvCommand`. Everything
+optional is defaulted so Linux is untouched, and the one change that was not
+optional made the Linux implementation shorter rather than longer. That is the
+shape the boundary was supposed to allow, and did.
 
 ### Daemon source map
 
@@ -527,8 +558,8 @@ daemon/
   99-esp32-ir-remote.rules       (udev rule — lets the daemon run unprivileged)
   src/
     main.cpp                     (wires transport + monitor, runs the event loop)
-    ITransport.h                 (abstract: send(cmd) -> bool)
-    IPowerMonitor.h              (abstract: sleep/wake/shutdown callbacks + run())
+    ITransport.h                 (abstract: send(cmd, budget) -> bool)
+    IPowerMonitor.h              (abstract: TvCommand + one command callback + run())
     HIDTransport.h / .cpp        (USB HID, sequence-correlated, budgeted)
     LinuxPowerMonitor.h / .cpp   (logind over D-Bus, inhibitor lock)
     WindowsPowerMonitor.h / .cpp (Win32 Service API — display state, device events)
@@ -573,6 +604,8 @@ the service has never been installed.** Last worked on 2026-08-26 —
 | USB suspend defect | **Fixed in firmware, flashed 2026-08-26, still unexercised.** Linux does not trigger the recovery path — see [below](#what-linux-actually-does-across-a-suspend). |
 | Service | **Never installed.** Everything below the console check is untested. |
 | Display-state design | **Unanswered.** Whether registration reports the current value — the assumption the boot `ON` rests on — needs the service running to find out. |
+| Display-off scoping | **Changed 2026-08-26.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. Never run. |
+| Per-event budgets | **Changed 2026-08-26.** The budget and the reason travel with each command, so a display change no longer inherits a suspend's 1500ms or logs itself as `(sleep)`. Never run. |
 
 `WindowsPowerMonitor.*` was rewritten against the design in this section. It
 compiles clean under `-Wall -Wextra` via an x86_64-w64-mingw32 cross-compile and
@@ -618,12 +651,18 @@ Ordered, because each step gates the next.
 
 2. **Install the service** on whichever machine is nearest, elevated, with the
    ESP32 plugged in first. The installer now prints the opening log lines when
-   it finishes, which answers two things at once: which power model the machine
-   is, and whether display-state registration delivered a value.
+   it finishes, which answers three things at once: which power model the machine
+   is, which display-off policy that put it under, and whether display-state
+   registration delivered a value.
 
    `display state = on` at registration means the boot `ON` works as designed.
-   `no display state reported at registration` means the fallback is carrying
-   it, and the way the opening state is read needs rethinking.
+   `no display state reported at registration` means nothing is being asserted
+   and the way the opening state is read needs rethinking.
+
+   Check the `display-off policy:` line says what the machine actually is before
+   reading anything below it — it decides whether an idle screen blank is
+   supposed to turn the TV off on this machine or supposed to be ignored, and
+   both outcomes are a pass against the right line.
 
 3. **Work through the verification table** on that machine, then run
    `verify-windows.ps1` and keep the report.
@@ -643,7 +682,7 @@ was a typo and is not true — recorded here so the claim does not resurface.
 
 ### Where the implementation departs from the plan
 
-Six things came out differently once the code was written. Recorded because a
+Seven things came out differently once the code was written. Recorded because a
 plan that silently stopped matching its implementation is worse than no plan.
 
 | | What changed, and why |
@@ -651,6 +690,7 @@ plan that silently stopped matching its implementation is worse than no plan.
 | **Service detection** | The plan chose `StartServiceCtrlDispatcherW` failing with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` as the test for "running as a service". It is the standard test and it cannot be used here: the redirect has to be decided before the first log line, and that call blocks until the service stops. A `--console` flag decides it instead; the dispatcher failure is still handled, to print guidance rather than exit silently. |
 | **What `--console` does** | Not a foreground daemon — power events reach services only, so there would be nothing to listen for. It sends one `ON` and reports the ACK, which makes it a device-reachability check that needs nothing installed. The first useful thing to run after a build. |
 | **Callbacks return `bool`** | `IPowerMonitor`'s callbacks were `void`. Suppressing repeat commands needs to know whether the device confirmed: recording an attempt that was never ACKed as the TV's new state would suppress the retry and leave it wrong indefinitely — the "reports success regardless" failure in a new place. Linux ignores the answer, having no such state. |
+| **One callback, carrying `TvCommand`** | The three callbacks became one. Windows raises commands for six distinct triggers, only two of which are a sleep or a shutdown, and routing the other four through `OnSleep`/`OnWake` gave them the wrong deadline and the wrong name in the log. The interface lost two setters and two virtuals in the process, and `LinuxPowerMonitor` got shorter. |
 | **Preshutdown timeout** | Set by the installer as the `PreshutdownTimeout` registry value, which is what `ChangeServiceConfig2` writes anyway, rather than by the service to itself at startup. It is install-time configuration and belongs with the rest of it. |
 | **`GUID_CONSOLE_DISPLAY_STATE`** | Spelled out in the source rather than taken from the SDK, which declares the power-setting GUIDs but leaves their definitions in a library whose name varies by SDK version. One line, and one fewer link-time question. |
 | **A third conditional in `main.cpp`** | The startup `ON` block is now inside `#ifdef __linux__`, against the stated end-state of exactly one. The honest alternative was a `justBooted()` on `IPowerMonitor` that Windows answers "never" — machinery to avoid a two-line guard. Noted rather than hidden. |
@@ -663,10 +703,15 @@ triggers. What it could not do was tell anyone *which* configuration had
 produced a given log, or notice the device it talks to coming and going. Both
 matter now that the testing spans three machines.
 
+The capability report added here for the first reason has since acquired a
+second: it decides whether an idle screen blank turns the TV off on this
+machine. See [the two halves of the display
+signal](#the-two-halves-of-the-display-signal-are-not-equally-safe).
+
 | Added | Why |
 |---|---|
 | **Power capability report at startup** | `CallNtPowerInformation(SystemPowerCapabilities)` read once and logged. Without it a log is ambiguous: an absent `PBT_APMSUSPEND` is a defect on an S3 desktop and correct on a Modern Standby laptop. |
-| **Device arrival and removal** | `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. A removal invalidates the transport's handle deliberately; an arrival re-asserts the current display state. |
+| **Device arrival and removal** | `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. A removal invalidates the transport's handle deliberately; an arrival re-asserts whatever state the daemon last decided the TV should be in. Deliberately *not* the last display state: on a machine where an idle blank is ignored the two disagree, and re-asserting the display would switch the TV off on a replug for a reason the policy had already rejected. Three things are tracked separately for that reason — what the screen said, what the daemon concluded, and what the TV confirmed. |
 | **`PBT_APMRESUMECRITICAL`** | Resume after an unannounced power loss — an emergency hibernate on a dying battery. Deprecated and still delivered, so it is named rather than logged as an unknown event number. Treated like an automatic resume: not evidence anybody is present. |
 | **Grace-period measurement** | Every suspend send reports how many of its budgeted milliseconds it used. The ~2s is guidance, not a contract, and this is the only way to learn what a given machine actually allows. |
 | **Away-time reporting** | Wall-clock elapsed across a suspend, so a brief Modern Standby dip and an overnight hibernate stop looking identical in the log. |
@@ -697,23 +742,38 @@ missing precisely on the cross-build nobody watches. The layout is documented
 and stable, so it is written out once with a `static_assert` guarding against a
 future SDK growing past it.
 
-### Three decisions the sanity check reversed
+### Five decisions the sanity check reversed
 
 Reviewing the settled decisions against each other — rather than against the
-code — found three places where a sound principle had been applied past where it
-held. All three were changed on 2026-08-26, and the reasoning is recorded where
-each decision lives rather than only here.
+code — found places where a sound principle had been applied past where it held.
+All were changed on 2026-08-26, and the reasoning is recorded where each
+decision lives rather than only here.
+
+The first three came from reading the decisions against one another. The last
+two came from a second pass reading them against the
+[Overview](#overview) — asking not "is this decision consistent?" but "does this
+still deliver the four rows in the table this device exists for?" That is a
+different question and it found different things.
 
 | Was | Now | Why it was wrong |
 |---|---|---|
 | No display state at registration → **assert ON** | Assert nothing; drive from the first display-state change | "Wrong only for a restart while the display is off" *is* the 3am case the design exists to prevent, and restart-on-failure makes that a configured behaviour. See [driving from display state](#driving-from-display-state). |
 | Skip any send that repeats the last asserted state | Skip only inside the suspend grace period | The optimisation was justified by the two-second window and then applied everywhere, including paths under no time pressure — discarding the drift repair that discrete IR codes exist to provide. |
 | `send()` budget may only tighten the default | Honoured in both directions | It made the Linux-sized default a ceiling for every platform, capping the Windows shutdown at 4s of an available 60s — on the one send with nothing after it to correct a TV left on. |
+| Display-off turns the TV off on **every** Windows machine | Only where no usable suspend event exists — see [the two halves of the display signal](#the-two-halves-of-the-display-signal-are-not-equally-safe) | One mechanism covering all three configurations was treated as the design's virtue. It is a virtue for the ON and a defect for the OFF: it took a behaviour a Modern Standby laptop forces — the TV going off under somebody still watching — and applied it to an S3 desktop that had a better signal available and needed nothing. |
+| Sleep and shutdown budgets supplied by `IPowerMonitor::sleepBudget()` / `shutdownBudget()` | The budget and the reason travel with the command, as `TvCommand` | The budget was attached to an event *class* rather than to the event. Once Windows drove the TV from display state, a screen blanking was routed through the sleep callback and inherited a suspend's 1500ms — on a path where nothing was waiting for the daemon at all, and which is among the likeliest to find the ESP32 mid-re-enumeration. It logged itself as `(sleep)` too. |
 
-The pattern in all three is the same, and it is the one the
+The pattern in all five is the same, and it is the one the
 [History](#history) section already names: a fix that closed the case in front
-of it without closing the class it belonged to. Each of these was a correct
-decision about one path, generalised one step too far.
+of it without closing the class it belonged to. Each was a correct decision
+about one path, generalised one step too far.
+
+The fifth is worth separating from the other four, because it is not only a
+wrong decision but a *shape* that produces them. Three callbacks that each
+implied their own deadline meant the deadline could not be stated per event;
+anything routed through the sleep callback silently became a sleep. Collapsing
+them to one callback carrying `{on, reason, budget}` removes the category, which
+is the difference between fixing the instance and closing the class.
 
 **Event Log is still deliberately not done.** It is the idiomatic Windows
 answer and it stays on the list rather than in the code, for the reason already
@@ -797,18 +857,22 @@ A product cannot ship a sleep path that only works on one of two power models.
 
 ### Driving from display state
 
-One mechanism covers all three configurations:
 `RegisterPowerSettingNotification` on `GUID_CONSOLE_DISPLAY_STATE`, with
 `DEVICE_NOTIFY_SERVICE_HANDLE`. Notifications arrive through the service control
 handler that already exists, as `SERVICE_CONTROL_POWEREVENT` carrying
 `dwEventType = PBT_POWERSETTINGCHANGE`.
+
+What each source can answer, before any decision about which to use:
 
 | Question | Suspend/resume events | Display state |
 |---|---|---|
 | Boot ON under Fast Startup | never fires | registration delivers the current value — display on at boot → ON |
 | Unattended 3am wake | `PBT_APMRESUMEAUTOMATIC` turns the TV on | display stays off on a maintenance wake → nothing fires |
 | Modern Standby sleep | no design | this *is* the documented S0ix signal |
-| S3 sleep | `PBT_APMSUSPEND`, works | display goes off ahead of the suspend anyway |
+| S3 sleep | `PBT_APMSUSPEND`, works | *could* work — the display goes off ahead of the suspend — but it also fires on an idle blank that is not a suspend at all, which is why it is not used here |
+
+Only the last row is a choice rather than a constraint, and it is the one the
+subsection below is about.
 
 **Why being liberal about triggers is safe.** The IR codes are discrete, not
 toggle — see [Manufacturer profiles](#manufacturer-profiles), where that choice
@@ -817,6 +881,68 @@ consequence here is that re-asserting a state the TV is already in is a no-op at
 the TV. So display state and `PBT_APMSUSPEND` can both be handled without either
 having to be exactly right; whichever arrives first wins and the other is
 absorbed.
+
+#### The two halves of the display signal are not equally safe
+
+This section originally read "one mechanism covers all three configurations",
+and treated that as the design's chief virtue. It is a virtue for the ON and a
+defect for the OFF, and collapsing them cost something real.
+
+**Display on → ON, on every machine.** The screen lighting up answers "is
+anyone there?" as directly as any Windows API does, and the failure mode if it
+is wrong is a TV switched on that the user turns off with their own remote. It
+is also the only route to an ON at boot, because the uptime gate does not
+survive Fast Startup. Nothing about this is machine-specific.
+
+**Display off → OFF, only where nothing else can.** Here the failure mode is the
+opposite shape and much worse: the TV switches off under somebody who is still
+watching. The mitigation is an assumption about other people's software —
+players are supposed to assert `ES_DISPLAY_REQUIRED` and the good ones do, but
+browsers and games are less consistent, and a game played on a controller
+generates no keyboard or mouse input at all. A PC connected to a television is
+this device's whole use case, so that failure lands exactly where it hurts most.
+
+On a **Modern Standby** machine that cost has to be paid: there is no classic
+suspend, `PBT_APMSUSPEND` may never arrive usefully, and a TV that never
+switches off fails one of the four rows in the [Overview](#overview) table. On a
+machine that reports **classic S3**, it does not: `PBT_APMSUSPEND` arrives, says
+what it means, and is the honest cause. Taking the behaviour a Modern Standby
+laptop forces and applying it to an S3 desktop buys nothing and pays the full
+price.
+
+So the policy is per machine, decided from the capability report the daemon
+already reads at startup:
+
+| Machine reports | Display off | What drives the OFF |
+|---|---|---|
+| S3, not Modern Standby | ignored | `PBT_APMSUSPEND` |
+| Modern Standby (`AoAc`) | **asserts OFF** | display state — the only signal there is |
+| Neither, or capabilities unreadable | **asserts OFF** | display state, because no suspend event can be relied on |
+
+The third row is the permissive one and is deliberate. "Unknown" means nothing
+can be assumed about whether a suspend event will ever arrive, and between a TV
+that occasionally switches off early and a TV that never switches off at all,
+the first is the annoyance and the second is a broken product.
+
+`displayOffDrivesOff()` in `WindowsPowerMonitor.cpp` is that table, and the
+daemon logs which branch it took on the line after the capability report — so a
+missing OFF on a screen blank reads as the documented behaviour rather than as a
+defect, without anybody having to remember which machine the log came from.
+
+**What this changes about the capability report.** It was added on 2026-08-26 as
+pure diagnostics — a line so a log could not be filed against the wrong
+configuration. It is now load-bearing: `AoAc` decides a behaviour. That is worth
+stating because it changes what a wrong reading costs. A machine that
+misreports, or one where `CallNtPowerInformation` fails, no longer merely
+produces a confusing log; it runs the wrong policy. The failure is bounded in
+the direction that matters — the fallback is the permissive branch, which errs
+towards the device doing its job — but it is no longer free.
+
+**This is the same mistake the [reversals](#five-decisions-the-sanity-check-reversed)
+section is about**, committed one more time in the section that records them: a
+decision that was correct for one machine, generalised to every machine because
+the mechanism happened to be available everywhere. It is listed as the fourth
+reversal there.
 
 **Suppressing the duplicate is scoped to the suspend path, and only there.**
 The last asserted state is tracked, but a send that would repeat it is skipped
@@ -854,31 +980,34 @@ cannot be collapsed at the point of arrival, because AUTOMATIC comes first and
 whether RESUMESUSPEND follows is not yet known.
 
 **The behaviour this changes, and how much of a choice it really was.**
-Display-off on an idle timeout turns the TV off while the user is still sitting
-there. A TV displaying a blanked desktop is not a state anyone wants, so this is
-defensible on its own merits — but it should be recorded honestly as a decision
-the API made rather than one the product did. Modern Standby exposes no usable
-suspend event, so display state is not the best available signal on that
-machine; it is the only one. The product behaviour was chosen to fit the
-mechanism.
+On a Modern Standby machine, display-off on an idle timeout turns the TV off
+while the user is still sitting there. That should be recorded honestly as a
+decision the API made rather than one the product did: Modern Standby exposes no
+usable suspend event, so display state is not the best available signal on that
+machine, it is the only one. The product behaviour was chosen to fit the
+mechanism, and scoping it to that machine is as far as the constraint can be
+pushed back.
 
-That leaves two things worth being straight about:
+Two things remain worth being straight about, both now narrower than they were:
 
-- **It makes Windows and Linux different products.** Linux drives from sleep
-  state only and never watches the display, so the same device behaves
-  differently depending on what the PC is running. Neither behaviour is wrong,
-  but nobody has decided they should differ — it fell out of the constraint
-  above. The options are to teach Linux the same trick via a session idle or
-  DPMS signal, or to accept the divergence explicitly and document it for
-  users. It is currently accepted by default, which is the one option nobody
-  chose.
+- **Windows and Linux are still different products, on one class of machine.**
+  Linux drives from sleep state only and never watches the display. An S3
+  Windows machine now matches it. A Modern Standby laptop does not, and cannot
+  without an idle signal Windows does not offer to a session-0 service in any
+  other form. That residue is forced rather than chosen, which makes it
+  something to document for users rather than a decision still owed. The
+  alternative — teaching Linux the same trick via a session idle or DPMS signal
+  — would spread a behaviour nobody wants to a platform that has no need of it,
+  and is not planned.
 - **The mitigation is an assumption about other people's software.** Media
   players are supposed to assert `ES_DISPLAY_REQUIRED` so the screen does not
   blank during playback, and the good ones do. Browsers and games are less
-  consistent, and the failure is loud: the TV switches off part-way through
+  consistent, and a game played on a controller produces no keyboard or mouse
+  input at all. The failure is loud: the TV switches off part-way through
   whatever is being watched. Worth testing deliberately with a browser-based
-  player rather than assuming the API contract is universally honoured — it is
-  the most likely source of a "this thing is broken" report from an actual user.
+  player and with a controller game on the Modern Standby machine — it is the
+  most likely source of a "this thing is broken" report from an actual user, and
+  it is now the *only* configuration where it can happen.
 
 **Two things to confirm before committing to this**, since the boot ON depends
 entirely on the first:
@@ -938,7 +1067,7 @@ are false and it is the mental model, not the syntax, that produced the bugs.
 | Remove | The local `stopEvent` that nothing ever signals, so the process lingers holding the HID device open and an immediate restart cannot find the ESP32. |
 | Add | `RegisterPowerSettingNotification` on `GUID_CONSOLE_DISPLAY_STATE`. The `POWERBROADCAST_SETTING` it delivers is valid only for the duration of the handler call, so the value must be copied out before returning. The handler currently discards `eventData` entirely. |
 | Add | `PBT_APMSUSPEND` and `PBT_APMRESUMEAUTOMATIC` as secondary triggers, absorbed by the last-asserted-state check rather than deduplicated by hand. |
-| Add | Last-asserted-state member; a send that would repeat the current state is skipped. |
+| Add | Last-asserted-state member; a send that would repeat the current state is skipped, but only inside a suspend — see [the reversals](#five-decisions-the-sanity-check-reversed). |
 | Add | Generation counter, bumped on every power transition. The worker discards queued or in-flight work belonging to a previous generation — see [in-flight work across a suspend](#threading-model--worker-thread). |
 | Add | Stop event as a member, signalled from `SERVICE_CONTROL_STOP`. |
 | Add | `SERVICE_PRESHUTDOWN_INFO` to set the preshutdown timeout explicitly rather than inheriting the default. |
@@ -966,21 +1095,33 @@ wrong for Windows *shutdown* and *boot*, where the SCM allows minutes and where
 a reopen after a replug cannot fit in 500ms.
 
 The budget is not platform-specific, it is **event**-specific: how long will
-this OS wait for me, for *this* event? Linux answers 5s for both sleep and
-shutdown; Windows answers ~2s for sleep and minutes for shutdown.
+this OS wait for me, for *this* event?
 
 | Event | Linux | Windows |
 |---|---|---|
-| Sleep | 4000ms (unchanged, proven) | ~1500ms |
-| Wake / boot / shutdown | 4000ms (unchanged, proven) | 4000ms |
+| Sleep | 4000ms default (unchanged, proven) | 1500ms — the suspend proceeds regardless |
+| Shutdown | 4000ms default (unchanged, proven) | 20000ms, against a 60s preshutdown timeout |
+| Wake, display change, device arrival | 4000ms default | 4000ms default — nothing is waiting |
 
-Implemented as `send(cmd, budget = SEND_BUDGET)`: the Linux call sites and the
-archived CDC transport are untouched, and only the Windows sleep path passes
-anything. This was previously deferred to a later consolidation pass on the
-grounds that it was an expensive interface change. With a defaulted parameter it
-is not, and the argument for the worker thread below — that an invariant nothing
-enforces will eventually be violated — applies here with equal force. A
+Implemented as `send(cmd, budget = SEND_BUDGET)`, with the value carried to the
+call site in the `TvCommand` the monitor raises. The archived CDC transport is
+untouched and Linux states nothing, so it takes the default everywhere.
+
+This was previously deferred to a later consolidation pass on the grounds that
+it was an expensive interface change. With a defaulted parameter it is not, and
+the argument for the worker thread below — that an invariant nothing enforces
+will eventually be violated — applies here with equal force. A
 `#if defined(_WIN32)` pair of constants would be that invariant.
+
+**A first attempt got the shape wrong**, and it is worth recording because the
+mistake looked exactly like the fix. The budget was supplied by
+`IPowerMonitor::sleepBudget()` and `shutdownBudget()` — per-platform virtuals
+answering per-event questions. That is one step better than a constant and one
+step short of correct: it made the budget a property of *which of three
+callbacks was invoked*, so a display change routed through `OnSleep` inherited a
+suspend's 1500ms and announced itself in the log as `(sleep)`. The three
+callbacks are now one, and both the deadline and the reason travel in the
+`TvCommand`.
 
 **`daemon/CMakeLists.txt`** — every `install()` rule and the whole CPack block
 are inside `if(UNIX AND NOT APPLE)`. Windows has no install path at all.
@@ -1040,7 +1181,7 @@ sequencing — get it working, then consolidate — not an oversight.
 | choosing which implementations to construct | stays; one conditional in `main.cpp` |
 
 Two rows that used to be on this list have left it. The send budget is being
-done now as a defaulted parameter rather than deferred, for the reasons in
+done now, carried in `TvCommand` rather than deferred, for the reasons in
 [Required changes](#required-changes--all-landed). And `systemJustBooted()` no longer needs
 consolidating: it stays Linux-only, because the Windows answer to the same
 question comes from display state rather than from an uptime reading. The
@@ -1055,10 +1196,11 @@ implementations to build — and nothing conditional anywhere else.
 | Decision | Chosen | Reasoning |
 |---|---|---|
 | `WindowsPowerMonitor.cpp` / `.h` | **Rewrite both**, keeping the Win32 boilerplate near-verbatim | The existing comments assert things that are false — that the handler "achieves the same guarantee as the Linux inhibitor lock", that "the OS waits for the handler to return before suspending". Wrong comments outlive wrong code, because they get read and believed. The dispatch table, `RegisterServiceCtrlHandlerExW` and `SERVICE_STATUS` setup are correct and get retyped as-is. |
-| Primary power signal | **`GUID_CONSOLE_DISPLAY_STATE`**, with suspend/resume events kept as secondary triggers | One mechanism covers all three Windows configurations, answers presence directly, and is the documented signal on Modern Standby. Discrete IR codes make the overlap with `PBT_APMSUSPEND` free. |
+| Presence signal for **ON** | **`GUID_CONSOLE_DISPLAY_STATE`**, on every machine, with `PBT_APMRESUMESUSPEND` as a fallback | The display lighting up answers presence directly, is the documented signal on Modern Standby, and is the only route to an ON at boot under Fast Startup. Discrete IR codes make the overlap with the resume event free. |
+| Signal for **OFF** | **`PBT_APMSUSPEND` where the machine has S3; display-off only where it does not** | The two halves of the display signal have opposite failure modes. A wrong ON is undone with the user's own remote; a wrong OFF blacks out a TV somebody is watching. Pay that only where there is no alternative — see [the two halves](#the-two-halves-of-the-display-signal-are-not-equally-safe). |
 | Boot detection | **None on Windows** | The uptime gate does not survive Fast Startup, and display state removes the need for it. `systemJustBooted()` stays Linux-only. |
-| Idle screen blank | **Turns the TV off** | The TV should not be lit showing a blanked desktop, and playback already prevents the blank via `ES_DISPLAY_REQUIRED`. A deliberate divergence from Linux. |
-| Send budget | **Defaulted parameter on `send()`**, not a platform constant, and honoured in both directions | The budget is event-specific, not platform-specific. Windows passes one for sleep (~1.5s, less than the default) *and* for shutdown (20s, more), because preshutdown allows minutes. Treating the transport default as a ceiling made one platform's tightest window every platform's limit — see [Timing](#invariants). |
+| Idle screen blank | **Turns the TV off on Modern Standby only** | Forced there, because no suspend event arrives. Ignored on an S3 machine, which then matches Linux. The divergence is confined to the machines whose API leaves no choice. |
+| Send budget | **Carried in `TvCommand`**, not a platform constant and not a virtual on the monitor, and honoured in both directions | The budget belongs to the *event*. Windows states less than the default for a suspend (~1.5s), more for a shutdown (20s, because preshutdown allows minutes), and nothing at all for a display change or a device arrival. Attaching it to an event class instead let a screen blank inherit a suspend's deadline — see [Timing](#invariants). |
 | Single instance | **Named mutex** | The service and a hand-run copy can both open the HID device and steal each other's ACKs. |
 | Service account | **LocalSystem now, LocalService once tested** | Whether hidapi's `CreateFile` open works under a low-privilege account is answerable in minutes with a working binary and not at all without one. Mirrors Linux, which ran as root until it worked and was then moved to `esp32ir`. |
 | Install | **`sc create` now, MSI at first release** | Packaging follows a working daemon, as it did on Linux. Use `start= auto`, not `delayed-auto`: nothing downstream now depends on a boot window, but a delayed start also postpones the first display-state reading by up to two minutes. |
@@ -1091,6 +1233,16 @@ reports status too, so the struct and `SetServiceStatus` are now touched from
 both the SCM handler thread and the worker. That needs a mutex; the transport
 does not.
 
+**The wait hint has to outlast the longest send.** The checkpoint advances
+either side of a send, not during one, so `dwWaitHint` is the SCM's answer to
+"how long may the gap between two checkpoints be before this service is hung?".
+The longest a single send can take is `SHUTDOWN_BUDGET`, 20s — so a 15s hint,
+which is what this originally carried, let the SCM call a working preshutdown
+send a hang. It is 30s now, with a `static_assert` tying it to the budget rather
+than a comment asking the next person to remember. Same defect shape as fix 11
+and fix 16 again: two numbers that have to hold a relationship, and nothing
+enforcing it.
+
 That invariant is why the device-removal notification added in 2026-08-26 does
 not call `ITransport::invalidate()` from the handler, even though it would be
 one line. The handler records the removal and returns; the worker performs the
@@ -1118,6 +1270,14 @@ The generation counter is the fix, and it is deliberately not a timing
 assumption: every power transition bumps it, and the worker drops anything
 carrying an older value. Correct whichever way the clock behaves.
 
+**Only a power transition may bump it.** A device arriving or leaving is not
+one, and bumping for either would discard an in-flight send that was correct and
+log `power state changed mid-command` about a machine whose power state did
+nothing of the sort — a false statement in the log, which is the failure class
+this project cares about most. The removal path was already written that way and
+said why; the arrival path was not, because it re-asserts through the same
+function every power event uses. It is an exception in that function now.
+
 ### Risks to check on the real machine
 
 - ~~**Which configuration this machine is.**~~ No longer a question anyone has
@@ -1134,6 +1294,14 @@ carrying an older value. Correct whichever way the clock behaves.
 - **Display-state registration.** That it delivers the current value on
   registration, and that `GUID_CONSOLE_DISPLAY_STATE` reaches a session-0
   service. The boot ON depends on both.
+- **The capability report is now load-bearing.** `AoAc` and `SystemS3` used to
+  be diagnostics; they now decide whether an idle screen blank turns the TV off.
+  Read the `display-off policy:` line on each of the three machines and confirm
+  it says what that machine actually is — a misread there is no longer a
+  confusing log, it is the wrong policy running. The failure is bounded in the
+  right direction (an unreadable capability set falls back to driving the OFF
+  from the display, which errs towards the device doing its job) but it is no
+  longer free.
 - **The ~2s grace period** is guidance, not a contract. Measure it. On Modern
   Standby the equivalent question is how much runway a session-0 service gets
   between display-off and the Desktop Activity Moderator throttling it.
@@ -1359,8 +1527,9 @@ three separate sessions comparable afterwards.
 | | Test | S3 box | S4 box | Modern Standby |
 |---|---|---|---|---|
 | 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24 |
-| 2 | Service installs, starts, and logs its power model correctly | no | no | no |
-| 3 | Idle screen blank turns the TV off; display returning turns it on | no | no | no |
+| 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | no |
+| 3 | Display returning turns the TV on | no | no | no |
+| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | no |
 | 4 | Sleep and wake, user-initiated | no | no | no |
 | 5 | Shutdown, then boot | no | no | no |
 | 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | no |
@@ -1379,11 +1548,14 @@ three separate sessions comparable afterwards.
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set |
+| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF |
 
 Test 15 is not a formality: it is the one the
 [largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
 the one most easily got wrong, because getting it wrong looks like nothing
-happening.
+happening. Test 17 is the one an actual user is most likely to find first, and
+the only one on this list that tests a product decision rather than a mechanism
+— everything else can pass while the device is still unpleasant to live with.
 
 ### Gaps against a genuinely commercial Windows product
 
@@ -1398,7 +1570,9 @@ rather than discovered later.
 | **Device notification on Linux** | ~~Both platforms~~ — Windows now reacts to `SERVICE_CONTROL_DEVICEEVENT`, added 2026-08-26. Linux still discovers a missing ESP32 only by failing a write and reopening; udev monitoring is the equivalent. The gap is now one-sided rather than symmetric. |
 | **Installer scope** | Partly closed 2026-08-26: `install-service.ps1` now upgrades in place, stops and removes the running service first, cleans up its registry values on uninstall, and sets the log ACL. Still not an MSI — no per-user upgrade path, no rollback, no Add/Remove Programs entry, and it needs an execution-policy bypass to run at all. |
 | **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. The installer sets restart/5s three times with a one-day reset, which specifies all of them — but the decision of whether to *stop* retrying eventually is still unmade, and restarting forever is a choice by default rather than by intent. |
-| **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across three sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. This is the largest single gap on the list. |
+| **The behaviour still differs by machine** | Scoping the display-off OFF removed the divergence on S3 machines, but a Modern Standby laptop still turns the TV off when its screen blanks and an S3 desktop does not. That is forced by the API rather than chosen, and it is not something a user can be expected to deduce. It needs a sentence in the user documentation that does not exist yet, and it is the one behaviour where "it works differently on my other PC" is a correct observation rather than a fault. |
+| **No way to override that** | The daemon has no configuration of any kind — no file, no registry values it reads, no flags beyond `--console`. Every policy in it is a compile-time decision. That is defensible while the audience is one person, and stops being defensible the moment somebody wants the screen blank ignored on their Modern Standby laptop and has no way to say so. The first thing that would need it is the display-off policy above. |
+| **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across three sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. The single command callback makes this materially cheaper than it was: a fake monitor now implements one method rather than five. This is the largest single gap on the list. |
 
 ---
 
@@ -1418,17 +1592,24 @@ history has the incidents. Breaking one of these is how the project regresses.
 
 **Timing**
 
-- The send budget belongs to the *event*, not the transport. It is however long
-  this OS will wait for us before proceeding without us, and only the caller
-  knows that. `sleepBudget()` and `shutdownBudget()` supply it; `send()` takes it
-  as a defaulted parameter and honours it **in both directions**, bounded only
-  by `MAX_SEND_BUDGET` as a backstop against a bug.
-- A stated budget that could only ever tighten was the earlier rule, and it was
-  wrong in a way that cost something real: it made the transport's Linux-sized
-  default a ceiling for every platform, silently capping the Windows shutdown at
-  four seconds when preshutdown allows sixty. Shutdown is the one send with no
-  event after it to correct a TV left on, and the one most likely to find the
-  device mid-re-enumeration.
+- The send budget belongs to the *event*, not the transport — and not to the
+  event's *class* either. It is however long this OS will wait for us before
+  proceeding without us, for this one event, and only whatever raised it knows
+  that. It travels in the `TvCommand`; `send()` takes it as a defaulted
+  parameter and honours it **in both directions**, bounded only by
+  `MAX_SEND_BUDGET` as a backstop against a bug.
+- Two earlier versions of that rule were wrong, in opposite ways, and both cost
+  something real. A budget that could only ever *tighten* made the transport's
+  Linux-sized default a ceiling for every platform, silently capping the Windows
+  shutdown at four seconds when preshutdown allows sixty — on the one send with
+  no event after it to correct a TV left on. A budget supplied by
+  `sleepBudget()` / `shutdownBudget()` then attached it to which of three
+  callbacks was invoked, so a Windows screen blank inherited a suspend's
+  1500ms while nothing was waiting for it at all.
+- A send under no deadline states zero and takes the transport's default. That
+  is not a detail: the display, wake and device-arrival paths are the ones most
+  likely to find the ESP32 mid-re-enumeration, so they are exactly where a
+  borrowed suspend budget does the most damage.
 - Linux: `send()` must complete within logind's `InhibitDelayMaxSec` (5s
   default). One shared budget, currently 4s, covering open + reopen + ACK wait.
 - Windows: a suspend cannot be delayed at all. `PBT_APMSUSPEND` is a
@@ -1470,13 +1651,21 @@ history has the incidents. Breaking one of these is how the project regresses.
 
 **Process lifecycle**
 
-- A command asserting the TV's state must be caused by something that implies a
+- A command asserting the TV **on** must be caused by something that implies a
   person is there. Linux answers that with the uptime gate — the startup `ON`
   mirrors a *boot*, not a process start. Windows answers it with console display
   state, which asks the question directly. Neither may be replaced by "the
   service started", and `PBT_APMRESUMEAUTOMATIC` may never assert `ON`: a
   machine waking itself for a maintenance window is not somebody walking into
   the room.
+- A command asserting the TV **off** must be caused by something that implies
+  the PC is going away, wherever the platform can tell. The two directions are
+  not symmetric and must not be given a symmetric rule: a wrong `ON` is undone
+  with the user's own remote, while a wrong `OFF` blacks out a television
+  somebody is watching. An idle screen blank is therefore an acceptable `OFF`
+  trigger only on a machine that raises no usable suspend event — and the daemon
+  decides that from the capability report rather than by assuming, because the
+  answer differs per machine and is not observable from behaviour.
 - Only one process may hold the device. Two openers of the same HID device
   consume each other's ACKs, which the sequence byte cannot catch — the reply is
   well-formed and correctly numbered, just for somebody else's request. Linux
@@ -1844,7 +2033,7 @@ Two ways out, neither done:
 | WiFi AP password hardcoded (`irremote123`) | Bounded — config mode is user-initiated and transient. Better: a per-device password derived from the chip ID, shown on the OLED beside the IP. |
 | `onNotFound` serves any file on LittleFS | `/profiles.json` and `/settings.json` are readable by anyone on the AP. Harmless today; a real leak the moment anything sensitive is stored. Fix with a whitelist or a `/www` prefix. |
 | POST body size is unbounded | `server.arg("plain")` buffers the whole request before any handler runs, so the 32-profile cap bounds the *list*, not the allocation preceding it. Bounded in practice by the AP password and by ArduinoJson returning `NoMemory` cleanly. A real fix needs a custom body handler. |
-| No firmware watchdog | Nothing feeds a task WDT on a device meant to sit powered continuously. A hung loop stays hung until it is unplugged. |
+| No firmware watchdog | Nothing feeds a task WDT on a device meant to sit powered continuously. A hung loop stays hung until it is unplugged. **The highest-priority item in this table**, and it is here rather than under [Blocking release](#blocking-release) only because it needs hardware time rather than a decision. The device's entire value is being more reliable than the network-based alternatives it exists to replace; a silent hang that persists until somebody notices the TV has stopped following the PC is precisely the failure those alternatives are criticised for. It is also the one defect in the project with no diagnostic at all — the daemon sees a write time out and reports honestly, but nothing anywhere says *why*. Sizing the timeout needs care: `loop()` performs blocking IR sends and serves the web UI, so the WDT has to tolerate the longest legitimate one. |
 | Cancelled shutdown is not handled | `PrepareForShutdown(false)` does nothing, so after a *cancelled* scheduled shutdown the delay inhibitor is not re-taken and the next sleep or shutdown goes undelayed. Bounded to that one event — the wake path re-takes unconditionally, so a sleep/wake cycle restores the lock. Deliberate, and narrower than it sounds: reaching the state at all needs the cancel to land inside the sub-second window between the shutdown beginning and the daemon releasing its lock. Cancelling during the scheduled wait beforehand does nothing, because no signal has fired yet. Judged not worth the code. |
 | No protocol version handshake | Deliberate while pre-release — see [Version lockstep is deliberate](#version-lockstep-is-deliberate). A mismatch is detected and logged distinctly, but not negotiated. Revisit at the first packaged release that reaches someone else. |
 
@@ -1968,6 +2157,19 @@ it was noticing the failure tracked *idle time* rather than any command.
 Diagnostics were the whole difference — "Write failed" alone supported four
 different stories equally, and three of them were wrong.
 
+The fourth chapter is this document. Prose has been the source of truth
+throughout, and by the time the Windows plan was complete it was long enough
+that keeping it internally consistent had quietly become the standard it was
+held to. Two passes were run over it: one checking the settled decisions against
+each other, which found three places a sound principle had been applied past
+where it held, and one checking them against the [Overview](#overview) table —
+the four rows the device exists to deliver — which found two more. The second
+question turned out to be the harder one, and the reason is worth keeping: a
+document can be entirely self-consistent and still have stopped describing the
+product it started as. "Display off turns the TV off" followed impeccably from
+every decision above it, and contradicted the first table in the file.
+
 The commit history has the detail: `7afd6bb` for the first pass, `23f3bd3` for
 the second, `cc15d74` for the Windows rewrite, `a243f68` for the USB suspend
-fix, and `3d8f37b` for the three power models.
+fix, `3d8f37b` for the three power models, and `f0fed26` for the first three
+reversals.

@@ -8,12 +8,48 @@
 //   LinuxPowerMonitor   — systemd-logind over D-Bus
 //   WindowsPowerMonitor — Win32 Service API, driven by console display state
 //
-// Callers register callbacks for each event then call run(), which blocks
-// and drives the underlying event loop until the process is killed.
+// Callers register one callback then call run(), which blocks and drives the
+// underlying event loop until the process is killed.
+
+// One assertion about what the TV should be doing, and everything the caller
+// needs to carry it out honestly.
+//
+// This used to be three separate callbacks — sleep, wake, shutdown — with the
+// time budget supplied by a pair of virtuals on this interface. That shape put
+// the budget on the *event class* rather than on the event, and the difference
+// stopped being academic the moment Windows started driving the TV from console
+// display state: a screen blanking was routed through the sleep callback and
+// therefore inherited a suspend's 1.5-second budget, on a path where nothing
+// was waiting for the daemon at all. It also logged itself as "(sleep)", which
+// is a plausible lie in the log of the kind the last two hardening passes were
+// spent removing.
+//
+// Both defects came from the same place: an event's *reason* and its *deadline*
+// are known only to whatever raised it, so they have to travel with the call
+// rather than be inferred from which of three functions was chosen.
+struct TvCommand {
+    // What the TV should be. The commands are idempotent assertions rather than
+    // instructions to toggle, which is why the IR codes are discrete.
+    bool on;
+
+    // Names the cause, for the log. Not decorative: "OFF (sleep)" and
+    // "OFF (display off)" are different claims about why the TV went off, and
+    // only one of them is true on any given line.
+    const char* reason;
+
+    // Wall-clock time the caller can afford to block for — however long this OS
+    // will wait before proceeding without us, for *this* event. Zero means "no
+    // limit beyond the transport's own default", which is what every Linux
+    // event and every unhurried Windows one answers.
+    std::chrono::milliseconds budget;
+};
+
 class IPowerMonitor {
 public:
-    // The callbacks return whether the device *confirmed* the command — the
-    // same guarantee ITransport::send() carries.
+    // Called whenever the TV's state should be asserted.
+    //
+    // Returns whether the device *confirmed* the command — the same guarantee
+    // ITransport::send() carries.
     //
     // An implementation that suppresses redundant commands needs that answer.
     // Recording an attempt that was never acknowledged as the TV's new state
@@ -21,15 +57,7 @@ public:
     // "reports success regardless" failure in a new place. An implementation
     // that keeps no state may ignore the result — LinuxPowerMonitor does,
     // because logind tells it what happened and it sends on every event.
-
-    // Called when the system is about to enter sleep.
-    virtual void setOnSleep(std::function<bool()> cb) = 0;
-
-    // Called when the system has woken from sleep.
-    virtual void setOnWake(std::function<bool()> cb) = 0;
-
-    // Called when the system is about to shut down.
-    virtual void setOnShutdown(std::function<bool()> cb) = 0;
+    virtual void setOnCommand(std::function<bool(const TvCommand&)> cb) = 0;
 
     // Called when the ESP32 itself appears or disappears, on a platform that
     // can say so. Strictly this is not a power event — but on Windows it
@@ -44,44 +72,13 @@ public:
     // LinuxPowerMonitor does not implement it; udev is the equivalent there if
     // it ever earns its place.
     //
-    // Implementations must invoke it on the same thread they invoke the power
-    // callbacks on, because the handler is expected to touch the transport and
+    // Implementations must invoke it on the same thread they invoke the command
+    // callback on, because the handler is expected to touch the transport and
     // transports are not required to be thread-safe.
     virtual void setOnDeviceChange(std::function<void(bool present)> /*cb*/) {}
 
     // Blocks and runs the event loop. Returns only when the process is killed.
     virtual void run() = 0;
-
-    // How long this platform will wait for us once a sleep has been announced.
-    //
-    // The question "how long have I got?" is answered by whatever raised the
-    // event, not by a transport that has no idea why it is being called. Linux
-    // holds a delay inhibitor and gives the same generous budget for every
-    // event, so it does not override this. Windows cannot veto a suspend and
-    // gives roughly two seconds — but minutes for shutdown, so only the sleep
-    // path is constrained.
-    //
-    // Zero means "no platform limit beyond the transport's own default".
-    virtual std::chrono::milliseconds sleepBudget() const {
-        return std::chrono::milliseconds::zero();
-    }
-
-    // The same question for shutdown, where the answer is usually the opposite.
-    //
-    // Sleep is the event a platform may refuse to wait for; shutdown is
-    // generally the one it waits longest for. Windows preshutdown allows
-    // minutes against roughly two seconds for a suspend, and the shutdown OFF
-    // is the last chance to leave the TV in the right state — there is no later
-    // event to correct it. Capping that at the sleep budget, or at the
-    // transport's own default, throws away headroom precisely where it is worth
-    // the most.
-    //
-    // Zero means "no platform limit beyond the transport's own default", which
-    // is Linux's answer: logind gives the same generous delay for both, and the
-    // transport's default is already sized against it.
-    virtual std::chrono::milliseconds shutdownBudget() const {
-        return std::chrono::milliseconds::zero();
-    }
 
     virtual ~IPowerMonitor() = default;
 };

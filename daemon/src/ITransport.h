@@ -25,8 +25,9 @@ public:
     // `budget` is the wall-clock time the caller can afford to block for, which
     // is a property of the *event* rather than of the transport: it is however
     // long this OS will wait for us before proceeding without us. Zero means
-    // "no caller-imposed limit" and the transport applies its own default.
-    // IPowerMonitor supplies the value — see sleepBudget() and shutdownBudget().
+    // "no caller-imposed limit" and the transport applies its own default. The
+    // value travels with the event that raised it — see TvCommand in
+    // IPowerMonitor.h, and why it is per-event rather than per-platform.
     //
     // A stated budget may be larger or smaller than the transport's default.
     // The two directions are both real: a Windows suspend cannot be delayed at

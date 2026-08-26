@@ -38,9 +38,9 @@ param(
     [string]$ServiceName = "esp32-ir-remote",
 
     # Must match DEVICE_VID / DEVICE_PID in firmware/src/main.cpp and
-    # daemon/src/main.cpp. Lowercase or uppercase hex, no 0x. This is the
-    # fourth place the pair appears — see the brief's USB device identity
-    # table, which now lists all four.
+    # daemon/src/main.cpp. Lowercase or uppercase hex, no 0x. This is one of
+    # five hand-kept copies — see the brief's USB device identity table, and
+    # the argument there for generating all five from one source instead.
     #
     # Not named -Pid: $PID is a PowerShell automatic variable holding the
     # process ID, and binding a parameter to it fails in ways that are not
@@ -223,10 +223,12 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/rest
 # documented API is ChangeServiceConfig2 with SERVICE_CONFIG_PRESHUTDOWN_INFO,
 # and this registry value is what that writes.
 #
-# 60s is far more than the send needs (the budget is 4s) and far less than the
-# 3-minute default, which would hold up a shutdown that long if the daemon ever
-# hung. Being explicit is the point: the timeout is now a decision rather than
-# whatever the OS defaults to this year.
+# 60s is comfortably more than the shutdown send can take — the daemon caps that
+# at 20s, deliberately below this — and far less than the 3-minute default, which
+# would hold up a shutdown that long if the daemon ever hung. Being explicit is
+# the point: the timeout is now a decision rather than whatever the OS defaults
+# to this year. Change it and SHUTDOWN_BUDGET in WindowsPowerMonitor.h has to
+# move with it; that is why the daemon's number is the smaller of the two.
 $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 New-ItemProperty -Path $key -Name "PreshutdownTimeout" `
                  -Value 60000 -PropertyType DWord -Force | Out-Null

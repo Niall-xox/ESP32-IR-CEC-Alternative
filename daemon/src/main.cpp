@@ -231,9 +231,9 @@ int main() {
 #endif
 
     // --- Wire up callbacks ---
-    // send() blocks until ACK is received from the ESP32, so by the time each
+    // send() blocks until ACK is received from the ESP32, so by the time the
     // callback returns the IR signal has been confirmed transmitted.
-    // LinuxPowerMonitor releases the inhibitor lock immediately after the callback.
+    // LinuxPowerMonitor releases the inhibitor lock immediately after it.
     //
     // The outcome is always reported honestly. A failed command previously
     // logged as though it had succeeded, which sent debugging in entirely the
@@ -242,39 +242,29 @@ int main() {
     // device confirmed can have it without a second variable. The Windows
     // monitor suppresses repeat commands and must not remember an unconfirmed
     // one as the TV's new state.
-    auto report = [](const char* cmd, const char* event, bool ok) {
+    auto report = [](const char* cmd, const char* reason, bool ok) {
         if (ok) {
-            std::cout << "[cmd] " << cmd << " sent and ACK received (" << event << ")\n";
+            std::cout << "[cmd] " << cmd << " sent and ACK received (" << reason << ")\n";
         } else {
             std::cerr << "[cmd] " << cmd << " FAILED — no ACK, TV state not changed ("
-                      << event << ")\n";
+                      << reason << ")\n";
         }
         return ok;
     };
 
-    // The sleep path is the one event a platform may not be able to wait out.
-    // The monitor answers how long it has, because it is the thing that knows
-    // why the callback is running — a transport has no idea. Linux does not
-    // override it and gets the transport's default; Windows asks for less,
-    // because a suspend proceeds about two seconds after announcing itself.
-    monitor->setOnSleep([&]() {
-        return report("OFF", "sleep", transport->send("OFF", monitor->sleepBudget()));
-    });
-
-    monitor->setOnWake([&]() {
-        return report("ON", "wake", transport->send("ON"));
-    });
-
-    // Shutdown asks the monitor the same question sleep does, and usually gets
-    // the opposite answer: this is the event a platform waits longest for, and
-    // the last chance to leave the TV right — nothing runs afterwards to correct
-    // it. Linux answers zero and gets the transport's default, which logind's
-    // delay already covers. Windows answers with tens of seconds, because
-    // preshutdown allows minutes and a device that is re-enumerating needs more
-    // than a suspend's worth of patience.
-    monitor->setOnShutdown([&]() {
-        return report("OFF", "shutdown",
-                      transport->send("OFF", monitor->shutdownBudget()));
+    // One callback for every assertion, because the three things that differ
+    // between them — the direction, the reason and the deadline — all travel in
+    // the command rather than being implied by which function was called.
+    //
+    // The monitor is what knows how long it has: it is the thing that knows why
+    // the callback is running, and a transport has no idea. Linux states
+    // nothing for every event and gets the transport's default, which logind's
+    // delay inhibitor already covers. Windows states less than the default for
+    // a suspend it cannot delay, more for a shutdown that preshutdown allows
+    // minutes for, and nothing at all for a display change nobody is waiting on.
+    monitor->setOnCommand([&](const TvCommand& c) {
+        const char* cmd = c.on ? "ON" : "OFF";
+        return report(cmd, c.reason, transport->send(cmd, c.budget));
     });
 
     // Device presence, where the platform reports it. No platform conditional:
@@ -286,8 +276,8 @@ int main() {
     // rather than the handle touched, and the monitor already owns that
     // decision because only it knows what state the display is in.
     //
-    // The monitor guarantees this runs on the same thread as the power
-    // callbacks, which is what makes calling into the transport here safe —
+    // The monitor guarantees this runs on the same thread as the command
+    // callback, which is what makes calling into the transport here safe —
     // HIDTransport is single-threaded by design and holds no lock.
     monitor->setOnDeviceChange([&](bool present) {
         if (!present) transport->invalidate();

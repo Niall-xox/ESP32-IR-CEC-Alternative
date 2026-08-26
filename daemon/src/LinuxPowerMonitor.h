@@ -26,13 +26,16 @@ public:
     LinuxPowerMonitor();
     ~LinuxPowerMonitor() override;
 
-    // The confirmation these return is deliberately ignored here: logind
+    // The confirmation this returns is deliberately ignored here: logind
     // reports every event, and this monitor sends on each one rather than
     // suppressing repeats, so it has no state that a failed send could
     // corrupt. See IPowerMonitor for why the answer exists at all.
-    void setOnSleep(std::function<bool()> cb) override;
-    void setOnWake(std::function<bool()> cb) override;
-    void setOnShutdown(std::function<bool()> cb) override;
+    //
+    // Every command this monitor raises states a zero budget. logind holds the
+    // system for InhibitDelayMaxSec — five seconds by default — for sleep and
+    // shutdown alike, and the transport's own default is already sized against
+    // that, so there is nothing here that a per-event number would say better.
+    void setOnCommand(std::function<bool(const TvCommand&)> cb) override;
 
     // Blocks and runs the sdbus event loop until the process is killed.
     void run() override;
@@ -54,6 +57,11 @@ private:
     void onPrepareForSleep(bool start);
     void onPrepareForShutdown(bool start);
 
+    // Raises one command and swallows anything it throws. Nothing a failed
+    // send does may stop the system sleeping or shutting down, and nothing may
+    // unwind into the sdbus event loop.
+    void assertTv(bool on, const char* reason);
+
     std::unique_ptr<sdbus::IConnection> connection_;
     std::unique_ptr<sdbus::IProxy>      proxy_;
 
@@ -62,7 +70,5 @@ private:
     // Destroying the UnixFd closes the fd, which releases the lock.
     std::optional<sdbus::UnixFd> inhibitorFd_;
 
-    std::function<bool()> onSleep_;
-    std::function<bool()> onWake_;
-    std::function<bool()> onShutdown_;
+    std::function<bool(const TvCommand&)> onCommand_;
 };

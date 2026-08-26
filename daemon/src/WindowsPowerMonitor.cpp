@@ -119,12 +119,48 @@ WindowsPowerMonitor::~WindowsPowerMonitor() {
     g_instance = nullptr;
 }
 
-void WindowsPowerMonitor::setOnSleep(std::function<bool()> cb)    { onSleep_    = std::move(cb); }
-void WindowsPowerMonitor::setOnWake(std::function<bool()> cb)     { onWake_     = std::move(cb); }
-void WindowsPowerMonitor::setOnShutdown(std::function<bool()> cb) { onShutdown_ = std::move(cb); }
+void WindowsPowerMonitor::setOnCommand(std::function<bool(const TvCommand&)> cb) {
+    onCommand_ = std::move(cb);
+}
 
 void WindowsPowerMonitor::setOnDeviceChange(std::function<void(bool)> cb) {
     onDeviceChange_ = std::move(cb);
+}
+
+// How long this OS will wait before proceeding without us, for this trigger.
+//
+// Only the suspend and the shutdown have a deadline at all. A display change,
+// a resume and a device arrival are all events nothing is waiting on, and they
+// state zero so the transport applies its own default — which matters most on
+// exactly those paths, because they are the ones most likely to find the ESP32
+// mid-re-enumeration and needing more than a suspend's worth of patience.
+std::chrono::milliseconds WindowsPowerMonitor::budgetFor(Trigger why) {
+    return why == Trigger::Suspend ? SLEEP_BUDGET : std::chrono::milliseconds::zero();
+}
+
+// Names the cause for the [cmd] line. "OFF (sleep)" and "OFF (display off)"
+// are different claims about why the TV went off, and putting the wrong one in
+// the log is the failure mode two hardening passes were spent removing.
+const char* WindowsPowerMonitor::reasonFor(Trigger why, bool on) {
+    switch (why) {
+    case Trigger::Suspend:       return "sleep";
+    case Trigger::Resume:        return "wake";
+    case Trigger::DeviceArrival: return "ESP32 reconnected";
+    case Trigger::DisplayState:
+    default:                     return on ? "display on" : "display off";
+    }
+}
+
+// Whether an idle screen blank should turn the TV off on this machine.
+//
+// Only a machine that positively reports classic S3 — and not Modern Standby —
+// is left alone, because only there is PBT_APMSUSPEND a signal that actually
+// arrives. Everywhere else, including a machine whose capabilities could not be
+// read at all, the display is the only evidence there is that nobody is
+// watching, and a TV that never switches off fails one of the four things this
+// device exists to do.
+bool WindowsPowerMonitor::displayOffDrivesOff() const {
+    return !(caps_.queried && caps_.s3 && !caps_.modernStandby);
 }
 
 void WindowsPowerMonitor::run() {
@@ -196,9 +232,18 @@ void WindowsPowerMonitor::serviceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
     // of the three configurations produced it. Without this line the rest of
     // the log is ambiguous: a missing PBT_APMSUSPEND is a defect on one machine
     // and the documented behaviour on another.
+    // Read before the worker starts and never written again, so both threads
+    // read it without a lock. It is not only diagnostic: displayOffDrivesOff()
+    // is derived from it, so the line below also states which of the two
+    // display policies this machine is about to run under.
     caps_ = queryPowerCapabilities();
     plog("machine power model: " + caps_.summary());
     for (const auto& line : caps_.details()) plog(line);
+    plog(displayOffDrivesOff()
+             ? "  display-off policy: an idle screen blank turns the TV off "
+               "(no usable suspend event on this machine)"
+             : "  display-off policy: an idle screen blank is ignored — "
+               "PBT_APMSUSPEND drives the OFF on this machine");
 
     // Subscribe to console display state. Registering is documented to report
     // the current value immediately, which is what gives the service its
@@ -306,18 +351,20 @@ void WindowsPowerMonitor::handleDeviceEvent(DWORD eventType, LPVOID eventData) {
     if (eventType == DBT_DEVICEARRIVAL) {
         plog("ESP32 arrived");
 
-        // Re-assert whatever the display last said. This is the retry that
-        // makes a wake survive the firmware re-enumerating itself: the wake ON
-        // was issued while the device was still coming back and failed, which
-        // cleared lastAsserted_, so this send is not suppressed as redundant.
+        // Re-assert whatever this daemon last decided the TV should be. That is
+        // desiredOn_ and deliberately not lastDisplayState_: on a machine where
+        // an idle blank is ignored the two disagree, and re-asserting the
+        // display state would switch the TV off on a replug for a reason the
+        // policy had already rejected.
         //
-        // When the earlier send did succeed, lastAsserted_ still holds and the
-        // worker skips this one — correct, because a device re-enumerating does
-        // not change what the TV is doing.
-        if (lastDisplayState_.has_value()) {
-            requestState(*lastDisplayState_, Trigger::DeviceArrival);
+        // This is the retry that makes a wake survive the firmware
+        // re-enumerating itself: the wake ON was issued while the device was
+        // still coming back and failed, and the removal cleared lastAsserted_,
+        // so this send is not suppressed as redundant.
+        if (desiredOn_.has_value()) {
+            requestState(*desiredOn_, Trigger::DeviceArrival);
         } else {
-            plog("no display state known yet — nothing to re-assert");
+            plog("no state decided yet — nothing to re-assert");
         }
     } else {
         plog("ESP32 removed");
@@ -458,9 +505,23 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
             case DISPLAY_OFF:
                 plog("display state = off");
                 lastDisplayState_ = false;
-                requestState(false, Trigger::DisplayState);
+                // Recorded either way, because PBT_APMRESUMESUSPEND defers to
+                // it — but only acted on where the display is the only signal
+                // this machine has. On a classic S3 machine PBT_APMSUSPEND
+                // arrives and is the honest cause, so an idle blank under
+                // somebody who is still watching is left alone.
+                if (displayOffDrivesOff()) {
+                    requestState(false, Trigger::DisplayState);
+                } else {
+                    plog("  ignored — this machine has S3, so the suspend "
+                         "event drives the OFF");
+                    bumpGeneration();
+                }
                 break;
             case DISPLAY_ON:
+                // Always acted on, on every machine. The screen lighting up is
+                // the most direct evidence there is that somebody is present,
+                // which is the question every ON has to answer.
                 plog("display state = on");
                 logAwayTime();
                 lastDisplayState_ = true;
@@ -507,9 +568,22 @@ void WindowsPowerMonitor::bumpGeneration() {
 }
 
 void WindowsPowerMonitor::requestState(bool on, Trigger why) {
+    // What the policy has decided, whether or not the send that follows
+    // succeeds. Read back by a later device arrival — see handleDeviceEvent().
+    desiredOn_ = on;
+
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        generation_.fetch_add(1, std::memory_order_relaxed);
+
+        // A device arriving is not a power transition, and bumping the
+        // generation for it would discard a send that was in flight and
+        // correct — logging "power state changed mid-command" about a machine
+        // whose power state did nothing of the sort. The same argument already
+        // keeps requestDeviceInvalidate() from bumping it.
+        if (why != Trigger::DeviceArrival) {
+            generation_.fetch_add(1, std::memory_order_relaxed);
+        }
+
         pendingOn_  = on;
         pendingWhy_ = why;
 
@@ -550,10 +624,16 @@ void WindowsPowerMonitor::workerLoop() {
     // state. Wait briefly for it rather than assuming it arrived.
     {
         std::unique_lock<std::mutex> lock(queueMutex_);
-        const bool arrived = queueCv_.wait_for(lock, INITIAL_STATE_WAIT, [this] {
+        queueCv_.wait_for(lock, INITIAL_STATE_WAIT, [this] {
             return pendingOn_.has_value() || shutdownRequested_ || stopRequested_ || deviceGone_;
         });
-        if (!arrived) {
+
+        // The diagnostic below turns on whether a *display state* arrived, not
+        // on whether the wait was cut short. A device removal or a stop landing
+        // inside the first two seconds also ends the wait, and reading that as
+        // "the opening state arrived" would silence the loudest line in the
+        // design at exactly the moment it was earned.
+        if (!pendingOn_.has_value()) {
             // Nothing is asserted. This used to assume the display was on, on
             // the grounds that it would be wrong only for a service restart
             // happening while the display was off — but that is precisely the
@@ -584,7 +664,7 @@ void WindowsPowerMonitor::workerLoop() {
 
     while (true) {
         std::optional<bool> want;
-        Trigger  why          = Trigger::Startup;
+        Trigger  why          = Trigger::DisplayState;
         bool     doShutdown   = false;
         bool     doStop       = false;
         bool     doInvalidate = false;
@@ -638,8 +718,10 @@ void WindowsPowerMonitor::workerLoop() {
             // repeat costs nothing worth saving.
             std::cout << "[event] Shutting down\n";
             reportPending();
-            if (onShutdown_) {
-                try { (void)onShutdown_(); } catch (...) {}
+            if (onCommand_) {
+                try {
+                    (void)onCommand_(TvCommand{false, "shutdown", SHUTDOWN_BUDGET});
+                } catch (...) {}
             }
             reportPending();
             break;
@@ -682,10 +764,6 @@ void WindowsPowerMonitor::workerLoop() {
                 case Trigger::Resume:
                     std::cout << "[event] Woke up\n";
                     break;
-                case Trigger::Startup:
-                    std::cout << (on ? "[event] Startup — display on\n"
-                                     : "[event] Startup — display off\n");
-                    break;
                 case Trigger::DeviceArrival:
                     std::cout << (on ? "[event] ESP32 reconnected — re-asserting on\n"
                                      : "[event] ESP32 reconnected — re-asserting off\n");
@@ -693,12 +771,20 @@ void WindowsPowerMonitor::workerLoop() {
                 }
                 reportPending();
 
+                // The reason and the deadline both travel with the command.
+                // Only the suspend has a deadline; everything else here is an
+                // event nothing is waiting on, and giving a screen blank a
+                // suspend's 1.5 seconds was a real defect — it applied the one
+                // path's time pressure to every path routed through the same
+                // callback.
                 bool confirmed = false;
-                try {
-                    if (on) { if (onWake_)  confirmed = onWake_(); }
-                    else    { if (onSleep_) confirmed = onSleep_(); }
-                } catch (...) {
-                    confirmed = false;
+                if (onCommand_) {
+                    try {
+                        confirmed = onCommand_(
+                            TvCommand{on, reasonFor(why, on), budgetFor(why)});
+                    } catch (...) {
+                        confirmed = false;
+                    }
                 }
 
                 // How much of the grace period the send actually used. The two

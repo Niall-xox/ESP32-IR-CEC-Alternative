@@ -22,44 +22,65 @@
 //
 // --- What drives the TV ---------------------------------------------------
 //
-// The primary signal is the console display state, subscribed to via
-// RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE) and delivered as
-// SERVICE_CONTROL_POWEREVENT / PBT_POWERSETTINGCHANGE. One mechanism covers all
-// three Windows configurations the brief enumerates:
+// Windows varies along two axes the brief enumerates — S3 versus Modern
+// Standby, and Fast Startup on or off — and no single signal covers every
+// combination on its own. Two do:
 //
-//   * Boot, including a Fast Startup boot. Registration reports the current
-//     value, so the service learns the display is on and turns the TV on. The
-//     uptime gate Linux uses cannot work here — Fast Startup hibernates the
-//     kernel session rather than shutting down, so the tick count does not
-//     reset and every power-on looks like a service restart.
-//   * Modern Standby (S0 low power idle), where no classic suspend occurs and
-//     PBT_APMSUSPEND may never arrive usefully. Display state is the documented
-//     signal on that power model.
-//   * An unattended wake — a maintenance window or a wake timer. The display
-//     stays off, so nothing fires. Handling PBT_APMRESUMEAUTOMATIC instead
-//     would turn the TV on at 3am with nobody there, which is the same defect
-//     the Linux uptime gate exists to prevent.
+//   * Console display state, via
+//     RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE), delivered
+//     as SERVICE_CONTROL_POWEREVENT / PBT_POWERSETTINGCHANGE.
+//   * The classic suspend and resume broadcasts, PBT_APMSUSPEND and
+//     PBT_APMRESUMESUSPEND.
 //
-// Suspend and resume events are kept as secondary triggers. PBT_APMSUSPEND
-// asserts off — it covers hibernate as well as sleep, since Windows announces
-// both the same way — and PBT_APMRESUMESUSPEND, which Windows sends only for a
-// user-initiated wake, asserts on. So the daemon still behaves correctly on a
-// machine where display-state notifications turn out not to arrive.
+// The display signal is asymmetric on purpose, and which half is used depends
+// on what the machine reports itself to be:
+//
+//   * **Display on always asserts ON.** The screen lighting up means somebody
+//     is at the machine, which is the question every ON has to answer. It is
+//     also the only route to an ON at boot: the uptime gate Linux uses cannot
+//     work here, because Fast Startup hibernates the kernel session rather than
+//     shutting down, so the tick count does not reset and every power-on reads
+//     as a service restart.
+//
+//   * **Display off asserts OFF only where nothing else can.** On a Modern
+//     Standby machine there is no classic suspend and PBT_APMSUSPEND may never
+//     arrive usefully, so the display blanking is the only signal there is. On
+//     a machine that reports classic S3, PBT_APMSUSPEND does arrive and is the
+//     honest signal, so an idle screen blank is left alone.
+//
+// That last distinction is the whole reason the capability report is read.
+// Driving OFF from a screen blank everywhere was the earlier design, and it
+// took a behaviour forced by one power model and applied it to a machine that
+// did not need it — turning the TV off under somebody who is still sitting
+// there watching something that failed to assert ES_DISPLAY_REQUIRED. That is
+// the device's own primary use case, a PC connected to a television, so the
+// failure lands exactly where it hurts most.
+//
+// On a machine whose capabilities cannot be read, or which reports neither S3
+// nor Modern Standby, display-off drives OFF. Unknown means no suspend event
+// can be relied on, and "the TV never goes off" fails one of the four things
+// this device exists to do, where an occasional early OFF is an annoyance the
+// user can undo with their own remote.
+//
 // PBT_APMRESUMEAUTOMATIC and PBT_APMRESUMECRITICAL are logged and deliberately
-// not acted on.
+// never assert ON: both fire for wake timers and maintenance windows, and
+// acting on them is how the daemon ends up turning the TV on at 3am to an empty
+// room — the defect the Linux uptime gate exists to prevent, arriving by
+// another route.
 //
 // Overlap between the two sources is free because the IR codes are discrete
 // rather than toggle: re-asserting a state the TV is already in is a no-op at
-// the TV. lastAsserted_ suppresses the redundant send anyway, so the duplicate
-// does not consume a suspend's short grace period.
+// the TV. lastAsserted_ suppresses the duplicate inside a suspend, where the
+// grace period is short — and only there, because outside one the repeat is the
+// drift repair discrete codes were chosen to provide.
 //
 // --- Knowing which machine this is ----------------------------------------
 //
 // The three configurations are not distinguishable from behaviour alone: an
 // absent PBT_APMSUSPEND is a defect on an S3 desktop and correct on a Modern
-// Standby laptop. The capability report is read once at startup and logged, so
-// every log says which machine produced it rather than leaving that to be
-// reconstructed later from a `powercfg /a` nobody ran at the time.
+// Standby laptop. The capability report is read once at startup, logged, and
+// then used — it decides the display-off policy above, so it is load-bearing
+// rather than merely diagnostic.
 //
 // --- Device presence ------------------------------------------------------
 //
@@ -70,7 +91,7 @@
 //
 //   * A removal invalidates the transport's handle deliberately, rather than
 //     leaving it to be discovered by the next write failing.
-//   * An arrival re-asserts the current display state. The firmware
+//   * An arrival re-asserts whatever state was last decided. The firmware
 //     re-enumerates itself after a USB suspend, so a wake ON issued while the
 //     device is still coming back fails; the arrival that follows a second
 //     later is what retries it. Without this the TV stays wrong until the next
@@ -85,7 +106,7 @@
 // There is no Windows equivalent of a logind delay inhibitor for sleep.
 // PBT_APMQUERYSUSPEND, which could veto a suspend, was removed after XP.
 // PBT_APMSUSPEND is a notification: the machine suspends roughly two seconds
-// later whether or not anything has finished. sleepBudget() is sized for that,
+// later whether or not anything has finished. SLEEP_BUDGET is sized for that,
 // and the ACK remains worth waiting for as the only evidence the IR fired.
 // How much of that budget was actually used is measured and logged, because
 // the two seconds is guidance rather than a contract.
@@ -114,27 +135,12 @@ public:
     WindowsPowerMonitor(uint16_t vid, uint16_t pid);
     ~WindowsPowerMonitor() override;
 
-    void setOnSleep(std::function<bool()> cb) override;
-    void setOnWake(std::function<bool()> cb) override;
-    void setOnShutdown(std::function<bool()> cb) override;
+    void setOnCommand(std::function<bool(const TvCommand&)> cb) override;
     void setOnDeviceChange(std::function<void(bool)> cb) override;
 
     // Registers and starts the Windows Service control dispatcher.
     // Blocks until the service is stopped by the OS.
     void run() override;
-
-    // Windows suspends about two seconds after announcing it and cannot be
-    // delayed, so a sleep send has to fail fast rather than block through the
-    // transition. Shutdown and wake are not constrained this way and use the
-    // transport's default.
-    std::chrono::milliseconds sleepBudget() const override { return SLEEP_BUDGET; }
-
-    // Shutdown is the opposite case. SERVICE_ACCEPT_PRESHUTDOWN allows minutes,
-    // and the installer sets PreshutdownTimeout to 60s explicitly, so there is
-    // real headroom here — and no event afterwards to correct a TV left on.
-    // Worth spending when the device is mid-re-enumeration, which is exactly
-    // when four seconds is not enough.
-    std::chrono::milliseconds shutdownBudget() const override { return SHUTDOWN_BUDGET; }
 
     // Called by the static service entry point and control handler, which
     // Windows requires to be plain functions with no captures.
@@ -154,20 +160,37 @@ private:
     static constexpr auto SHUTDOWN_BUDGET = std::chrono::milliseconds(20000);
 
     // How long the worker waits at startup for the display-state notification
-    // that registration should deliver, before falling back to asserting on.
+    // that registration should deliver, before logging that the opening state
+    // is unknown. Nothing is asserted either way — see workerLoop().
     static constexpr auto INITIAL_STATE_WAIT = std::chrono::milliseconds(2000);
 
-    // Reported to the SCM as the time work may take. Generous: exceeding it is
-    // what makes the SCM decide the service has hung.
-    static constexpr DWORD PENDING_WAIT_HINT_MS = 15000;
+    // Reported to the SCM as the time work may take. It has to exceed the
+    // longest a single send can block for, which is SHUTDOWN_BUDGET: the
+    // checkpoint only advances either side of a send, so a shorter hint lets
+    // the SCM decide the service has hung while it is doing exactly what
+    // preshutdown gave it the time for.
+    static constexpr DWORD PENDING_WAIT_HINT_MS = 30000;
+    static_assert(PENDING_WAIT_HINT_MS > SHUTDOWN_BUDGET.count(),
+                  "the wait hint must outlast the longest send, or the SCM will "
+                  "call a working shutdown send a hang");
 
-    enum class Trigger { DisplayState, Suspend, Resume, Startup, DeviceArrival };
+    enum class Trigger { DisplayState, Suspend, Resume, DeviceArrival };
 
     void workerLoop();
     void requestState(bool on, Trigger why);
     void requestShutdown();
     void requestDeviceInvalidate();
     void bumpGeneration();
+
+    // How long this OS will wait for us, and what to call it in the log — both
+    // properties of the trigger rather than of the direction. A screen blanking
+    // and a suspend both send OFF and are not remotely the same event.
+    static std::chrono::milliseconds budgetFor(Trigger why);
+    static const char*               reasonFor(Trigger why, bool on);
+
+    // Whether an idle screen blank should turn the TV off on this machine.
+    // Answered from the capability report — see the class comment.
+    bool displayOffDrivesOff() const;
 
     // True if a device-notification name refers to this ESP32 rather than to
     // some other HID device. Compares the VID/PID substring the interface path
@@ -195,10 +218,8 @@ private:
     uint16_t vid_;
     uint16_t pid_;
 
-    std::function<bool()>         onSleep_;
-    std::function<bool()>         onWake_;
-    std::function<bool()>         onShutdown_;
-    std::function<void(bool)>     onDeviceChange_;
+    std::function<bool(const TvCommand&)> onCommand_;
+    std::function<void(bool)>             onDeviceChange_;
 
     SERVICE_STATUS        status_       = {};
     SERVICE_STATUS_HANDLE statusHandle_ = nullptr;
@@ -207,9 +228,9 @@ private:
     HPOWERNOTIFY displayNotify_ = nullptr;
     HDEVNOTIFY   deviceNotify_  = nullptr;
 
-    // Read once at startup and logged. Kept because the summary is worth
-    // repeating alongside a surprising event rather than only at line one of a
-    // log that may since have rotated.
+    // Read once at startup, logged, and then consulted on every display-off
+    // notification. Written before the worker starts and never again, so the
+    // worker and the handler both read it without a lock.
     WindowsPowerCapabilities caps_;
 
     // Signalled by the worker once it has finished and is exiting, so
@@ -225,7 +246,7 @@ private:
     // need executing, so a newer request replaces an older one. Replaying a
     // backlog after a resume would fire stale commands.
     std::optional<bool> pendingOn_;
-    Trigger             pendingWhy_ = Trigger::Startup;
+    Trigger             pendingWhy_ = Trigger::DisplayState;
     bool                shutdownRequested_ = false;
     bool                stopRequested_     = false;
 
@@ -252,19 +273,33 @@ private:
     // while suspended.
     std::atomic<uint64_t> generation_{0};
 
-    // What the TV was last told to be, so a repeat assertion is skipped.
-    // Unset means unknown — after startup, or after a send whose result was
-    // discarded as stale.
+    // What the TV was last told to be *and confirmed as*, so a repeat assertion
+    // can be skipped inside a suspend. Unset means unknown — before the first
+    // command, after one whose ACK never arrived, and after a device removal.
     std::optional<bool> lastAsserted_;
 
-    // Last display state reported by the OS, or unset if it has never reported
-    // one. Distinct from lastAsserted_, which is what the *TV* was told: this
-    // is what the *machine* said about itself.
+    // The last state the policy decided the TV should be in, whether or not the
+    // send succeeded. Three distinct things are tracked here and conflating any
+    // two of them has already caused a bug:
     //
-    // It exists so the resume events can stay a fallback rather than a second
-    // opinion, and so a device arrival has a state to re-assert. Written and
-    // read only on the SCM handler thread, which delivers controls one at a
-    // time, so it needs no lock.
+    //   lastDisplayState_ — what the machine said about its own screen
+    //   desiredOn_        — what this daemon concluded the TV should be
+    //   lastAsserted_     — what the TV actually confirmed
+    //
+    // A device arrival re-asserts desiredOn_, not lastDisplayState_. On a
+    // machine where an idle blank deliberately does *not* turn the TV off, the
+    // two disagree, and re-asserting the display state would switch the TV off
+    // on a replug for a reason the policy had already rejected.
+    //
+    // Written and read only on the SCM handler thread, which delivers controls
+    // one at a time, so neither needs a lock.
+    std::optional<bool> desiredOn_;
+
+    // Last display state reported by the OS, or unset if it has never reported
+    // one. Kept even where it does not drive an OFF, because it is what lets
+    // PBT_APMRESUMESUSPEND stay a fallback rather than a second opinion: a
+    // resume raised while the screen is still dark is a DRIPS exit, not
+    // somebody walking into the room.
     std::optional<bool> lastDisplayState_;
 };
 
