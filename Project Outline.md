@@ -607,11 +607,11 @@ boot — is still unexercised. Last worked on 2026-08-26 —
 | Windows build | **Works.** Builds under MSVC via vcpkg, and cross-compiles clean under `-Wall -Wextra` for x86_64-w64-mingw32, linking a complete PE. |
 | Device reachable | **Verified 2026-08-24, re-verified 2026-08-26** against the reflashed firmware. `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
 | S3 suspend | **Written; the events seen, the S3 path not.** `PBT_APMSUSPEND` and `PBT_APMRESUMESUSPEND` both fired on 2026-08-26 — on a Fast Startup shutdown, not an S3 suspend — and both behaved correctly, the resume declining to assert `ON` while the display was known off. A real S3 suspend still needs the S3 machine. |
-| Hibernate (S4) | **Partly verified 2026-08-26.** Windows announces hibernate through the same `PBT_APMSUSPEND`, and a Fast Startup shutdown *is* a kernel-session hibernate — that path now works end to end, including `away for 23s` across it. A user-initiated hibernate has still not been run. |
+| Hibernate (S4) | **Verified 2026-08-26**, both ways: a Fast Startup shutdown (`boot type 0x1`, `away for 23s`) and a real `shutdown /h` hibernate (`boot type 0x2`, `away for 62s`). The second produced the project's first grace-period measurement and disproved the expectation that the device would re-enumerate across it. |
 | Modern Standby | **Verified 2026-08-26** — three real cycles, one of 4h11m, including an unattended maintenance wake that correctly left the TV off. Display state is the only signal that fires on S0ix, and it carried the whole thing. See [what the cycles showed](#what-the-modern-standby-cycles-actually-showed). |
 | Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
-| Grace-period measurement | **New 2026-08-26.** Each suspend send reports how many of its budgeted milliseconds it used. |
+| Grace-period measurement | **New 2026-08-26, and it has produced its first number the same day: 206ms of 1500ms.** Each suspend send reports how many of its budgeted milliseconds it used. It only reports when a suspend send actually happens, which needs the suspend to arrive before the display-off `OFF` has been confirmed. |
 | USB suspend defect | **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. It took 12.6s to come back, which is the new number to design against. |
 | Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
 | Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
@@ -778,10 +778,16 @@ the observed behaviour of the machine rather than a prediction about it.
 
 **12.6 seconds is the number to remember.** The brief guessed "a second later".
 Recovery after a long standby took twelve, against 0.4s after the two-minute
-one, so the gap scales with how deeply the machine slept. That is twelve seconds
-of a user looking at a dark TV after opening their laptop, and it is the largest
-remaining user-visible defect on this platform even though every component
-behaved exactly as designed.
+one. That is twelve seconds of a user looking at a dark TV after opening their
+laptop, and it is the largest remaining user-visible defect on this platform
+even though every component behaved exactly as designed.
+
+The obvious explanation — that the gap scales with how deeply the machine slept
+— was written here and falsified the same night by the hibernate test, which
+cuts *more* power and reconnected with no removal at all. Whatever the twelve
+seconds is, it belongs to how Modern Standby handles the USB controller and not
+to how much power was taken away. See
+[the hibernate](#the-hibernate--and-the-two-predictions-it-falsified).
 
 **No suspend event fires on the standby path.** Across four hours of standby the
 log contains no `PBT_APMSUSPEND`, no away-time report and no grace-period
@@ -856,6 +862,69 @@ resume, then display-on. On this platform the display signal brackets the power
 events on both sides, which is why it can be the authority and the power events
 can be advisory. On an S3 machine with Fast Startup off, that order will not
 hold — and that is the reason the other two machines are still worth testing.
+
+### The hibernate — and the two predictions it falsified
+
+Test 14, run 2026-08-26 at 23:54 with `shutdown /h`. Windows logs `boot type
+0x2`, which is a genuine resume from hibernate rather than the Fast Startup
+`0x1` of the test before it. It passed — and it disproved two written
+expectations, one from the brief and one written a few hours earlier in this
+same section.
+
+```
+23:54:31.153 display state = off
+[event] Display off
+23:54:31.194 PBT_APMSUSPEND (sleep or hibernate)
+[cmd] OFF sent and ACK received (display off)
+23:54:31.265 power state changed mid-command — result discarded as stale
+[event] Going to sleep
+[cmd] OFF sent and ACK received (sleep)
+23:54:31.390 suspend send took 206ms of the 1500ms budget
+23:55:34.111 away for 62s
+23:55:34.111 PBT_APMRESUMESUSPEND while display is known off — not asserting on
+23:55:34.140 PBT_APMRESUMEAUTOMATIC (resume, presence unknown) — not acted on
+23:55:34.185 display state = on
+[cmd] ON sent and ACK received (display on)
+```
+
+**The suspend grace period finally has a number: 206ms of the 1500ms budget.**
+This is one of the two things the brief listed as measurements rather than
+pass/fail, and the first time any machine has produced one. It was measurable
+here for a reason worth keeping: the display-off and the suspend arrived **41ms
+apart**, so the display-off `OFF` was still in flight when the suspend fired and
+the suspend send was *not* suppressed. On the Fast Startup shutdown they were
+613ms apart, the TV was already confirmed off, and the send was skipped. The
+grace period is therefore measurable only when the two events collide — which is
+also the only time it matters.
+
+**Prediction one, falsified: the ESP32 did not re-enumerate.** The brief said a
+hibernate resume "is the cheapest real test of the device-arrival path", on the
+reasoning that the device *will* have re-enumerated after full power loss. There
+is no `ESP32 removed` and no `ESP32 arrived` anywhere in the cycle. The handle
+survived, and the `ON` went out and was ACKed on the first attempt. The
+device-arrival path was not exercised at all, so test 14 passed *without*
+testing the thing it was chosen to test.
+
+**Prediction two, falsified: recovery was faster, not slower.** Written a few
+hours earlier here was the expectation that hibernate would be slower than the
+12.6s Modern Standby recovery, because it cuts power more completely. It was
+instantaneous. Deeper sleep, less disruption — the opposite of the stated
+reasoning, so the reasoning was wrong rather than imprecise.
+
+The likely mechanism, offered as inference and not as evidence: S4 leaves the
+USB ports on standby power, so the ESP32 never lost power, never restarted and
+never re-enumerated — the machine came back and found the device exactly where
+it left it. Modern Standby, despite being the lighter state, *deliberately*
+powers the controller down as part of entering DRIPS. That would make the
+device's disappearance a thing the OS does on purpose in one state and does not
+do in the other, which fits every observation but has not been confirmed against
+anything but the daemon's own log.
+
+**Both resume events fired before the display change this time**, in the
+opposite order to the Fast Startup boot, and both declined to assert `ON` on the
+same grounds. The ordering of the three signals has now been seen both ways
+round, and the outcome did not depend on which arrived first — which is the
+property that makes display state the authority rather than a tiebreak.
 
 ### Where the implementation departs from the plan
 
@@ -1674,7 +1743,7 @@ What this means in practice:
 |---|---|
 | **S3, Fast Startup off** | `PBT_APMSUSPEND` as a real suspend trigger; a true cold boot, and therefore the only honest test of the boot `ON` |
 | **S3 or S4, Fast Startup on** | That the boot `ON` survives a hibernated kernel session — the case the uptime gate could never have handled |
-| **Hibernate (S4)** | That a resume after full power loss to the device re-establishes the transport. The ESP32 *will* have re-enumerated, so this is the cheapest real test of the device-arrival path |
+| **Hibernate (S4)** | ~~That a resume after full power loss to the device re-establishes the transport. The ESP32 *will* have re-enumerated, so this is the cheapest real test of the device-arrival path.~~ **Wrong, and shown to be on 2026-08-26.** The ESP32 did not re-enumerate: no removal, no arrival, the handle survived and the first `ON` was ACKed. What this machine class actually proves is the opposite — that a hibernate is *less* disruptive to USB than a Modern Standby cycle |
 | **Modern Standby** | The DRIPS cycle, the display-state signal in its native habitat, and whether the firmware's USB recovery survives a bus suspend that no registry setting prevents |
 
 Two things remain measurements rather than pass/fail, and both need the real
@@ -1682,7 +1751,11 @@ hardware:
 
 - **The suspend grace period.** Microsoft's ~2s is guidance, not a contract. The
   daemon now measures and logs what each send actually used, so this is read off
-  the log rather than assumed.
+  the log rather than assumed. **First number, 2026-08-26: 206ms of the 1500ms
+  budget**, on the Modern Standby laptop's hibernate. Only measurable when the
+  display-off and the suspend collide closely enough that the suspend send is
+  not already suppressed — 41ms apart here, against 613ms on the Fast Startup
+  shutdown, where nothing was sent and nothing could be timed.
 - **The Modern Standby runway** between display-off and the Desktop Activity
   Moderator throttling a session-0 service. Same category, same method.
 
@@ -1724,7 +1797,7 @@ three separate sessions comparable afterwards.
 | 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only — half of it landed elsewhere on 2026-08-26: the event *fires* on the Modern Standby laptop's Fast Startup shutdown, but it did not drive the OFF, because the display-off had already sent it. "Drives the OFF" still needs a machine where the suspend arrives without a display change in front of it |
 | 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off |
 | 13 | Boot with Fast Startup **enabled** | any machine with hibernate — **passed 2026-08-26** on the Modern Standby laptop, `boot type 0x1`. The strongest form of the pass: no service start appears in the log at all, because Fast Startup resumed the same process, and the `ON` happened anyway |
-| 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
+| 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine — **passed 2026-08-26** on the Modern Standby laptop (`boot type 0x2`), but *not as described*: the device never re-enumerated and the arrival re-assert never ran. See [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified) |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
 | 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Blocked until a screen timeout exists**: the test laptop is set to never blank, so there is no timeout to run past. Set `VIDEOIDLE` to a few minutes first, or the row cannot be answered either way |
