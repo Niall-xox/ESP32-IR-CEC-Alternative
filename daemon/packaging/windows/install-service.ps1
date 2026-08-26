@@ -1,4 +1,4 @@
-# Installs the ESP32 IR Remote daemon as a Windows Service.
+﻿# Installs the ESP32 IR Remote daemon as a Windows Service.
 #
 # The equivalent of Linux's postinst plus the unit file, minus a package
 # manager. This is the "sc create now, MSI at first release" step from the
@@ -45,6 +45,13 @@ param(
     # Not named -Pid: $PID is a PowerShell automatic variable holding the
     # process ID, and binding a parameter to it fails in ways that are not
     # obvious from the error.
+    #
+    # The two helper functions below took the warning and then declared
+    # `param($Vid, $Pid)` anyway, which threw "Cannot overwrite variable Pid
+    # because it is read-only or constant" — after the service had been
+    # created and before it was started. Found on the first real install,
+    # 2026-08-26. The names are spelled out in full everywhere now, because a
+    # rule that holds at the top of a file holds inside it too.
     [string]$VendorId  = "1234",
     [string]$ProductId = "5678",
 
@@ -112,9 +119,9 @@ function Remove-DaemonService {
 # Left behind, they would keep suppressing selective suspend for a device whose
 # daemon is gone — a machine quietly carrying a setting nothing on it explains.
 function Reset-UsbSelectiveSuspend {
-    param([string]$Vid, [string]$Pid)
+    param([string]$VendorId, [string]$ProductId)
 
-    $hardwareKey = "VID_$Vid&PID_$Pid"
+    $hardwareKey = "VID_$VendorId&PID_$ProductId"
     $enumRoot    = "HKLM:\SYSTEM\CurrentControlSet\Enum\USB"
     $cleared     = 0
 
@@ -142,7 +149,7 @@ if ($Uninstall) {
         Write-Host "No service named '$ServiceName' was installed."
     }
 
-    $cleared = Reset-UsbSelectiveSuspend -Vid $VendorId -Pid $ProductId
+    $cleared = Reset-UsbSelectiveSuspend -VendorId $VendorId -ProductId $ProductId
     if ($cleared -gt 0) {
         Write-Host "Cleared $cleared selective-suspend registry value(s)."
     }
@@ -249,9 +256,9 @@ New-ItemProperty -Path $key -Name "PreshutdownTimeout" `
 # values for the hardware ID, which arrives with the driver package and code
 # signing already listed as gaps.
 function Disable-UsbSelectiveSuspend {
-    param([string]$Vid, [string]$Pid)
+    param([string]$VendorId, [string]$ProductId)
 
-    $hardwareKey = "VID_$Vid&PID_$Pid"
+    $hardwareKey = "VID_$VendorId&PID_$ProductId"
     $enumRoot    = "HKLM:\SYSTEM\CurrentControlSet\Enum\USB"
 
     # Collected first, then written. A counter incremented inside a piped
@@ -277,7 +284,7 @@ function Disable-UsbSelectiveSuspend {
     return $paramKeys.Count
 }
 
-$suspendApplied = Disable-UsbSelectiveSuspend -Vid $VendorId -Pid $ProductId
+$suspendApplied = Disable-UsbSelectiveSuspend -VendorId $VendorId -ProductId $ProductId
 if ($suspendApplied -gt 0) {
     Write-Host "Disabled USB selective suspend on $suspendApplied device instance(s)."
     Write-Host "Unplug and replug the ESP32 for that to take effect."

@@ -1,4 +1,4 @@
-# Captures what a Windows machine is and what the daemon is doing on it.
+﻿# Captures what a Windows machine is and what the daemon is doing on it.
 #
 # The Windows work has to be proven on three configurations — classic S3,
 # hibernate, and Modern Standby — and a machine can only ever be one of them,

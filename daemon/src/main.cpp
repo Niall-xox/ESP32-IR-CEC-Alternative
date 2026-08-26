@@ -94,17 +94,57 @@ static bool consoleMode() {
 // ERROR_ACCESS_DENIED counts as "already running" too.
 static HANDLE g_singleInstance = nullptr;
 
+// How long to wait for a previous instance to finish exiting before concluding
+// that one is genuinely still running.
+//
+// A service restart is not a clean handover. The SCM reports a service Stopped
+// as soon as the service reports SERVICE_STOPPED, and the process stays alive
+// for a short time after that — still holding this mutex, which is released
+// only by exiting. The replacement instance then starts into a name that has
+// not gone away yet and refuses to run over a copy that is already leaving.
+//
+// Observed on 2026-08-26, on the first machine this service was ever installed
+// on: the same Restart-Service failed once and succeeded once, and the old
+// process was demonstrably still alive at the moment the SCM said Stopped.
+// Without this, a restart is a coin toss and the service stays down when it
+// loses.
+//
+// Waiting rather than releasing the mutex earlier in the stop path, because the
+// same window opens where there is no stop path to fix: the recovery policy
+// restarts this service after a crash, and a crashed process is precisely the
+// one that got no chance to release anything.
+//
+// Five seconds is well inside the SCM's 30s start timeout, and a hand-run copy
+// started while the service is genuinely running waits it out and then refuses
+// — a slower no, not a different one.
+static constexpr ULONGLONG SINGLE_INSTANCE_WAIT_MS = 5000;
+
 static bool claimSingleInstance() {
-    g_singleInstance = CreateMutexW(nullptr, TRUE, L"Global\\ESP32IRRemote_SingleInstance");
-    const DWORD err = GetLastError();
+    const ULONGLONG deadline = GetTickCount64() + SINGLE_INSTANCE_WAIT_MS;
+    bool waited = false;
 
-    if (g_singleInstance && err != ERROR_ALREADY_EXISTS) return true;
+    for (;;) {
+        g_singleInstance = CreateMutexW(nullptr, TRUE, L"Global\\ESP32IRRemote_SingleInstance");
+        const DWORD err = GetLastError();
 
-    if (g_singleInstance) {
-        CloseHandle(g_singleInstance);
-        g_singleInstance = nullptr;
+        if (g_singleInstance && err != ERROR_ALREADY_EXISTS) {
+            if (waited) {
+                std::cout << "[sys] A previous instance was still exiting; "
+                             "waited for it and claimed the device.\n";
+            }
+            return true;
+        }
+
+        if (g_singleInstance) {
+            CloseHandle(g_singleInstance);
+            g_singleInstance = nullptr;
+        }
+
+        if (GetTickCount64() >= deadline) return false;
+
+        waited = true;
+        Sleep(100);
     }
-    return false;
 }
 
 // %ProgramData%\ESP32IRRemote — writable by a service under any account,
@@ -153,10 +193,51 @@ static void redirectLogsToFile() {
         }
     }
 
-    FILE* out = nullptr;
-    FILE* err = nullptr;
-    _wfreopen_s(&out, path.c_str(), L"a", stdout);
-    _wfreopen_s(&err, path.c_str(), L"a", stderr);
+    // _wfreopen, not _wfreopen_s, and the deprecation warning is suppressed
+    // deliberately rather than silenced by habit.
+    //
+    // The secure variants open with exclusive access: nothing else may open the
+    // file at all for as long as this process holds it. The log is the only
+    // record the whole Windows verification plan is read from, and under
+    // _wfreopen_s it was unreadable for exactly as long as the service ran —
+    // Get-Content, verify-windows.ps1's log tail, and the installer's own
+    // "opening log lines" display all failed with a sharing violation.
+    //
+    // The stderr call was failing for the same reason and had been all along:
+    // it could not open a file stdout already held exclusively, so stderr was
+    // never redirected. Neither call's result was checked, so neither said so.
+    // They are checked now — a service whose log went nowhere should not be a
+    // silent outcome.
+    //
+    // Found on the first real install, 2026-08-26. Diagnosed from the installer
+    // throwing on its last line, which is the one step that reads the log back.
+    //
+    // The pragma is guarded because this file is also cross-compiled for
+    // mingw-w64, where gcc does not know `#pragma warning` and -Wall's
+    // -Wunknown-pragmas would report it — trading an MSVC warning for a gcc one
+    // and losing the clean cross-build that catches everything else.
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4996)  // _wfreopen: the _s variant opens exclusively
+#endif
+    FILE* out = _wfreopen(path.c_str(), L"a", stdout);
+    FILE* err = _wfreopen(path.c_str(), L"a", stderr);
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+
+    // Nothing to log the failure to if this happened, which is the point: the
+    // console is the only place left that can say so. Narrow rather than
+    // std::wcerr, because a wide write would fix the stream's orientation and
+    // every narrow log line after it would silently fail — which is the failure
+    // this branch exists to report, reintroduced by the report itself.
+    if (!out || !err) {
+        SetConsoleOutputCP(CP_UTF8);
+        char utf8[MAX_PATH * 4] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1,
+                            utf8, sizeof(utf8), nullptr, nullptr);
+        std::cerr << "[sys] could not open the log file at " << utf8 << "\n";
+    }
 }
 
 #endif // _WIN32

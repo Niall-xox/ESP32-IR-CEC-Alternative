@@ -73,13 +73,17 @@ sleep/wake/shutdown/boot cycle have all been exercised against the real device
 and daemon. Two items remain untested, neither on the power-sync path — see
 [Still unverified on hardware](#still-unverified-on-hardware).
 
-**Windows — implemented for all three power models 2026-08-26, none of it run.**
-The daemon builds and links, and one binary now covers classic S3, hibernate
-(S4) and Modern Standby (S0 low power idle). It reports which of the three the
-machine is at startup, reacts to the ESP32 arriving and leaving, and measures
-how much of a suspend's grace period each send actually consumed. The service
-has still never been installed, so every runtime assumption in it remains
-unproven. Pick it up at [Resume here](#resume-here).
+**Windows — installed and running as a service 2026-08-26; no power event yet
+exercised.** The daemon builds and links, and one binary now covers classic S3,
+hibernate (S4) and Modern Standby (S0 low power idle). It reports which of the
+three the machine is at startup, reacts to the ESP32 arriving and leaving, and
+measures how much of a suspend's grace period each send actually consumed. The
+first install, on the Modern Standby laptop, found
+[four defects](#the-first-install--four-defects) — three of which would have
+stopped anybody installing it at all — and after those it starts, identifies its
+own power model correctly, reads the display state at registration and survives
+repeated restarts. No suspend, resume, shutdown or boot has yet been run with it
+in place. Pick it up at [Resume here](#resume-here).
 
 **Reviewed against the project's aims 2026-08-26, and two things changed.** The
 brief had grown detailed enough to be internally consistent while drifting from
@@ -529,11 +533,14 @@ so.
 
 ### Windows status
 
-**Built and complete; never run as a service.** `WindowsPowerMonitor.*` was
-rewritten on 2026-08-24 and finished on 2026-08-26. It builds under MSVC, and
-`--console` has opened the device, sent `ON` and received the ACK on real
-hardware. What has never happened is the service running — so every power event
-it handles is still an unverified assumption.
+**Running as a service; no power event yet exercised.**
+`WindowsPowerMonitor.*` was rewritten on 2026-08-24 and finished on 2026-08-26,
+and installed for the first time later that day on the Modern Standby laptop —
+which found [four defects](#the-first-install--four-defects) and then started,
+reported its power model correctly, read the display state at registration and
+survived five consecutive restarts. What has still never happened is a suspend,
+a resume, a shutdown or a boot with the service in place, so every power event
+it handles remains an unverified assumption.
 
 The full picture, including which of the three power models each part covers, is
 in [Windows — in progress](#windows--in-progress).
@@ -585,8 +592,12 @@ daemon/
 
 ## Windows — in progress
 
-The current focus. **Written, building and complete for all three power models;
-the service has never been installed.** Last worked on 2026-08-26 —
+The current focus. **Installed and running as a service for the first time on
+2026-08-26**, on the Modern Standby laptop. That first install found
+[four defects](#the-first-install--four-defects), all fixed; three of them would
+have stopped anybody installing this at all, and none were visible to any
+compiler. Everything past service start — every suspend, resume, shutdown and
+boot — is still unexercised. Last worked on 2026-08-26 —
 [resume here](#resume-here).
 
 ### Where it stands
@@ -594,7 +605,7 @@ the service has never been installed.** Last worked on 2026-08-26 —
 | | State |
 |---|---|
 | Windows build | **Works.** Builds under MSVC via vcpkg, and cross-compiles clean under `-Wall -Wextra` for x86_64-w64-mingw32, linking a complete PE. |
-| Device reachable | **Verified 2026-08-24.** `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
+| Device reachable | **Verified 2026-08-24, re-verified 2026-08-26** against the reflashed firmware. `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
 | S3 suspend | **Written.** `PBT_APMSUSPEND` → OFF, `PBT_APMRESUMESUSPEND` → ON. Never run — the 2026-08-24 test machine has no S3 in firmware. |
 | Hibernate (S4) | **Written.** Windows announces hibernate through the same `PBT_APMSUSPEND`, so it needs no separate branch; the resume side is the same two events. Never run. |
 | Modern Standby | **Written.** Display state is the only signal that fires on S0ix, and it is the primary trigger for that reason. Never run as a service. |
@@ -602,9 +613,9 @@ the service has never been installed.** Last worked on 2026-08-26 —
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
 | Grace-period measurement | **New 2026-08-26.** Each suspend send reports how many of its budgeted milliseconds it used. |
 | USB suspend defect | **Fixed in firmware, flashed 2026-08-26, still unexercised.** Linux does not trigger the recovery path — see [below](#what-linux-actually-does-across-a-suspend). |
-| Service | **Never installed.** Everything below the console check is untested. |
-| Display-state design | **Unanswered.** Whether registration reports the current value — the assumption the boot `ON` rests on — needs the service running to find out. |
-| Display-off scoping | **Changed 2026-08-26.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. Never run. |
+| Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
+| Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
+| Display-off scoping | **Changed 2026-08-26, and the branch verified the same day.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. The Modern Standby laptop correctly reports `an idle screen blank turns the TV off (no usable suspend event on this machine)`. The blank itself has not been tested. |
 | Per-event budgets | **Changed 2026-08-26.** The budget and the reason travel with each command, so a display change no longer inherits a suspend's 1500ms or logs itself as `(sleep)`. Never run. |
 
 `WindowsPowerMonitor.*` was rewritten against the design in this section. It
@@ -645,30 +656,37 @@ of reading the events tells those apart.
 
 Ordered, because each step gates the next.
 
-1. **Build on Windows** and run `--console` to confirm the device still answers
-   after the 2026-08-26 flash. Note anything MSVC `/W4` reports — the tree is
-   clean under gcc's `-Wall -Wextra`, which is not the same set.
+~~1. **Build on Windows** and run `--console`.~~ Done 2026-08-26 on the Modern
+Standby laptop. Clean under MSVC `/W4`, and the ACK came back from the reflashed
+firmware.
 
-2. **Install the service** on whichever machine is nearest, elevated, with the
-   ESP32 plugged in first. The installer now prints the opening log lines when
-   it finishes, which answers three things at once: which power model the machine
-   is, which display-off policy that put it under, and whether display-state
-   registration delivered a value.
+~~2. **Install the service.**~~ Done the same day, after
+[four defects](#the-first-install--four-defects). It reports itself as Modern
+Standby, puts itself under the correct display-off policy, and reads
+`display state = on` at registration — which answers the design question the
+boot `ON` rested on.
 
-   `display state = on` at registration means the boot `ON` works as designed.
-   `no display state reported at registration` means nothing is being asserted
-   and the way the opening state is read needs rethinking.
+3. **The physical tests on this machine.** Everything left needs somebody at the
+   keyboard watching a TV, which is where the work now is. In rough order of
+   what they prove:
 
-   Check the `display-off policy:` line says what the machine actually is before
-   reading anything below it — it decides whether an idle screen blank is
-   supposed to turn the TV off on this machine or supposed to be ignored, and
-   both outcomes are a pass against the right line.
+   - **Replug the ESP32.** Owed anyway — the installer disables selective
+     suspend on the device instance and that needs a re-enumeration to take
+     effect. It is also test 7, and the arrival path is what the wake `ON`
+     depends on.
+   - **The screen blank** (test 3b, then 3), which on this machine is supposed
+     to turn the TV off — and then **test 17**, the video and the game left
+     running past the timeout, which is the one that decides whether that policy
+     is liveable rather than merely implemented.
+   - **A Modern Standby cycle** (test 15), the largest open risk and the only
+     test of the firmware's USB recovery.
+   - **Shutdown and boot** (test 5), then **hibernate and resume** (test 14):
+     this machine has hibernate, so it can answer 13 and 14 too, leaving only
+     the two genuinely S3-specific rows for the other box.
 
-3. **Work through the verification table** on that machine, then run
-   `verify-windows.ps1` and keep the report.
-
-4. **Repeat on the other two**, so each of S3, hibernate and Modern Standby is
-   covered by a machine that actually implements it.
+4. **Then run `verify-windows.ps1`** and keep the report, and **repeat on the
+   other two machines**, so each of S3, hibernate and Modern Standby is covered
+   by a machine that actually implements it.
 
 5. **The standby cycle** remains the largest single risk, and the one thing the
    firmware fix still has not been shown to survive. Three outcomes to tell
@@ -679,6 +697,36 @@ Not on this list and still open from before any of it: the release guard on
 
 An earlier version of this brief claimed Windows was "confirmed working". That
 was a typo and is not true — recorded here so the claim does not resurface.
+
+### The first install — four defects
+
+The service had been written, reviewed, cross-compiled and sanity-checked
+against its own design before anybody ran it. Installing it once found four
+defects in about forty minutes. Recorded in the order they surfaced, because
+each one was hiding the next: nothing below could be observed until the thing
+above it was fixed.
+
+| | Defect | Why nothing caught it |
+|---|---|---|
+| 1 | **`install-service.ps1` did not parse at all** under Windows PowerShell 5.1. The file was UTF-8 with no BOM; 5.1 falls back to the ANSI code page, and an em-dash's third byte (`0x94`) decodes as `"` — U+201D, which PowerShell accepts as a *string delimiter*. The string on line 171 ended early and swallowed the closing brace three lines later. Fixed by adding a UTF-8 BOM to both Windows scripts. | Nothing in this project had ever executed a `.ps1`. The brief already knew 5.1 mis-decodes UTF-8 — it says so about `Get-Content` and the log — and the same fact applied to the *scripts themselves* was not noticed. `verify-windows.ps1` had ten of the same characters and was equally unrunnable. |
+| 2 | **`param([string]$Vid, [string]$Pid)`** in both selective-suspend helpers. `$PID` is a read-only automatic variable, so binding threw — *after* the service had been created and before it was started, leaving a machine with an installed service that had never run. | The script's own parameter block carries a comment explaining exactly this trap and choosing `-ProductId` to avoid it. The two helper functions below it then did the thing the comment warns against. A rule that holds at the top of a file holds inside it too. |
+| 3 | **The daemon's log could not be read while the daemon ran.** `_wfreopen_s` — like every secure-CRT `_s` open — takes the file *exclusively*. Nothing else could open it at all: not `Get-Content`, not a shared-read handle, not `verify-windows.ps1`'s log tail, not the installer's own closing display. Fixed by using `_wfreopen` with the deprecation suppressed deliberately. | It is invisible to the process doing it — the daemon's own writes work perfectly. And the same call for `stderr` had been *failing since it was written*, because it could not open a file `stdout` already held exclusively. Neither return value was checked, so the daemon had been running with stderr unredirected and no way to say so. Both are checked now. |
+| 4 | **A service restart was a coin toss.** The SCM reports a service `Stopped` when it reports `SERVICE_STOPPED`, while the process lives on briefly — still holding the single-instance mutex, which is released only by exiting. The replacement instance refused to start over a copy that was already leaving. Fixed with a bounded 5s wait in `claimSingleInstance`. | Genuinely intermittent: the same `Restart-Service` failed once and succeeded once within two minutes. After the fix, five consecutive restarts all passed **and all five logged the wait** — so the race was firing every time and had simply been winning more often than losing. |
+
+**What the four have in common.** None is a logic error in the thing that was
+designed so carefully; all four are in the seam between the program and the
+platform, and every one of them needed the platform to find it. The compiler saw
+nothing — MSVC `/W4` reported not one warning across the whole tree, so gcc's
+`-Wall -Wextra` had not been hiding anything either. The cross-compile that
+"links a complete PE with every import resolving" was true and proved nothing
+about any of this. Two of the four were in PowerShell, which nothing compiles at
+all.
+
+Three of the four would have stopped *anybody* installing this, on any of the
+three machines, before a single power event was tested. The brief's own summary
+of the position — "that is a syntax, type and symbol check, and **not** evidence
+that any of it behaves correctly" — turned out to be exactly right, and the
+distance between the two was four defects wide.
 
 ### Where the implementation departs from the plan
 
@@ -1515,8 +1563,10 @@ so, so a report cannot silently be filed against the wrong configuration.
 ### Verification plan
 
 Mirror what was done on Linux, since that is what "up to standard" means here.
-**Nothing below has been run.** Tick these off as they pass, the way the Linux
-second pass was recorded, so the record is a record rather than a memory.
+**Started 2026-08-26 on the Modern Standby laptop**: the four rows that need no
+power transition pass there. Everything still marked `no` needs somebody at the
+keyboard watching a TV. Tick these off as they pass, the way the Linux second
+pass was recorded, so the record is a record rather than a memory.
 
 Run `verify-windows.ps1` on each machine first: it captures the power model,
 service configuration, device state and log in one file, which is what makes
@@ -1526,16 +1576,16 @@ three separate sessions comparable afterwards.
 
 | | Test | S3 box | S4 box | Modern Standby |
 |---|---|---|---|---|
-| 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24 |
-| 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | no |
-| 3 | Display returning turns the TV on | no | no | no |
+| 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24, again 2026-08-26 |
+| 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | **yes**, 2026-08-26 |
+| 3 | Display returning turns the TV on | no | no | partly — asserted from the *registration* reading at every service start; a real display-off→on transition is untested |
 | 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | no |
 | 4 | Sleep and wake, user-initiated | no | no | no |
 | 5 | Shutdown, then boot | no | no | no |
-| 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | no |
+| 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
 | 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | no |
-| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | no |
-| 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | no |
+| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | partly — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up |
+| 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | **yes**, 2026-08-26 |
 | 10 | Unconfigured profile answering `ERR` | no | no | no |
 
 **Configuration-specific — only the machine that has it can answer:**
@@ -1670,11 +1720,36 @@ history has the incidents. Breaking one of these is how the project regresses.
   consume each other's ACKs, which the sequence byte cannot catch — the reply is
   well-formed and correctly numbered, just for somebody else's request. Linux
   gets this from the service unit; Windows needs the named mutex.
+- That mutex must tolerate a predecessor that is still exiting. A restart is not
+  a handover: the SCM calls a service stopped the moment it reports
+  `SERVICE_STOPPED`, while the old process is still alive and still holding the
+  name. Refusing immediately makes every restart a race — one that was observed
+  firing on all five of five restarts, and had simply been winning most of them.
+  The wait is bounded, so a genuine second instance is still refused.
 - `std::cout` must be unbuffered (`std::unitbuf`). Under systemd stdout is a
   pipe, so it is fully buffered by default and log lines never reach the journal;
   redirected to a file on Windows it is buffered for the same reason. Anything
   written just before the process is stopped is lost otherwise — including the
   `OFF` confirmation on shutdown, which is the one line most worth having.
+- The log must stay readable *while* the daemon holds it. It is the only record
+  the entire Windows verification plan is read from, and a log nobody can open
+  until the service stops is not a log. This rules out the secure-CRT `_s` file
+  opens, which take the file exclusively — and which fail silently at it, since
+  the process doing the excluding is the one process that can still write.
+- Every redirect of `stdout` or `stderr` is checked. An unredirected stream is a
+  daemon talking to nobody, and it has no way to report that except the console
+  it no longer has.
+
+**Windows scripts**
+
+- The `.ps1` files keep their UTF-8 BOM. Windows PowerShell 5.1 reads a BOM-less
+  file as ANSI, which turns an em-dash's trailing byte into U+201D — a character
+  PowerShell honours as a *string delimiter*. One mis-decoded dash silently
+  swallows the rest of a line, the closing brace after it, and the script.
+- Function parameters may not be named `$Pid`, `$Host`, `$Error`, `$Input` or
+  anything else PowerShell has already claimed. `$PID` is read-only and binding
+  to it throws at call time, not at parse time — so it survives every check that
+  does not actually run the function.
 
 **Privilege**
 
@@ -1872,6 +1947,14 @@ Get-Content C:\ProgramData\ESP32IRRemote\daemon.log -Wait -Tail 30 -Encoding UTF
 assumes the ANSI code page and mangles every em-dash. PowerShell 7 defaults to
 UTF-8 and does not need it.
 
+**Both `.ps1` files carry a UTF-8 BOM and have to keep it.** That is the same
+mis-decode applied to the scripts rather than the log, and there it is fatal
+rather than ugly: 5.1 reads a BOM-less UTF-8 file as ANSI, an em-dash's trailing
+byte becomes `"` (U+201D), PowerShell treats that as a string delimiter, and the
+file stops parsing — see [defect 1](#the-first-install--four-defects). Any editor
+that helpfully re-saves these without a BOM breaks both scripts on every Windows
+client machine, and the error it produces names a line that is not the problem.
+
 The installer prints the opening log lines when it finishes, which is where the
 capability report and the first display-state reading appear — the two things
 every later step is read against.
@@ -2039,12 +2122,14 @@ Two ways out, neither done:
 
 ### Windows implementation
 
-Not listed here, and for a narrower reason than before. The Windows daemon now
-builds, links and covers all three power models, but it **has never run as a
-service** — so what would otherwise be a defect backlog is still a list of
-unverified assumptions rather than observed failures. They live in
-[Windows — in progress](#windows--in-progress), alongside the
-[verification plan](#verification-plan) that has yet to be started.
+Still not listed here, and the reason has narrowed again. The first install on
+2026-08-26 produced four *observed* failures rather than guesses — and all four
+were fixed the same day, so they are recorded as
+[what the first install found](#the-first-install--four-defects) rather than as
+a backlog. What remains is once more a list of unverified assumptions: no
+suspend, resume, shutdown or boot has been run with the service installed. They
+live in [Windows — in progress](#windows--in-progress), alongside the
+[verification plan](#verification-plan) that is now four rows in.
 
 Listing guesses here as though they were defects would put the two kinds of
 claim in the same table, which is the habit the
@@ -2168,6 +2253,24 @@ question turned out to be the harder one, and the reason is worth keeping: a
 document can be entirely self-consistent and still have stopped describing the
 product it started as. "Display off turns the TV off" followed impeccably from
 every decision above it, and contradicted the first table in the file.
+
+The fifth chapter was running it. After four chapters of increasingly careful
+reasoning about a service nobody had ever started, starting it once found
+[four defects in about forty minutes](#the-first-install--four-defects) — and
+not one of them was reachable by any further amount of reading. Two were in
+PowerShell, which nothing in this project compiles; one was a CRT open mode
+whose failure is invisible to the process committing it; one was a race that had
+been losing perhaps a third of the time and would have read as "the service
+sometimes doesn't come back" for however long it took to become suspicious.
+
+The lesson is not that the reasoning was wasted — the design it produced started
+correctly on the first machine and reported itself accurately about a power
+model it had never seen. It is that the four passes had been auditing the half
+of the system written in C++ and reviewed against a plan, while the defects were
+all in the seam where that half meets a platform: file encodings, reserved
+variable names, sharing modes, and the gap between what the SCM says and what
+the OS has actually finished doing. Prose can be checked against prose
+indefinitely and will never report any of them.
 
 The commit history has the detail: `7afd6bb` for the first pass, `23f3bd3` for
 the second, `cc15d74` for the Windows rewrite, `a243f68` for the USB suspend
