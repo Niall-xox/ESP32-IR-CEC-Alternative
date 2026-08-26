@@ -608,11 +608,11 @@ boot — is still unexercised. Last worked on 2026-08-26 —
 | Device reachable | **Verified 2026-08-24, re-verified 2026-08-26** against the reflashed firmware. `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
 | S3 suspend | **Written.** `PBT_APMSUSPEND` → OFF, `PBT_APMRESUMESUSPEND` → ON. Never run — the 2026-08-24 test machine has no S3 in firmware. |
 | Hibernate (S4) | **Written.** Windows announces hibernate through the same `PBT_APMSUSPEND`, so it needs no separate branch; the resume side is the same two events. Never run. |
-| Modern Standby | **Written.** Display state is the only signal that fires on S0ix, and it is the primary trigger for that reason. Never run as a service. |
+| Modern Standby | **Verified 2026-08-26** — three real cycles, one of 4h11m, including an unattended maintenance wake that correctly left the TV off. Display state is the only signal that fires on S0ix, and it carried the whole thing. See [what the cycles showed](#what-the-modern-standby-cycles-actually-showed). |
 | Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
 | Grace-period measurement | **New 2026-08-26.** Each suspend send reports how many of its budgeted milliseconds it used. |
-| USB suspend defect | **Fixed in firmware, flashed 2026-08-26, still unexercised.** Linux does not trigger the recovery path — see [below](#what-linux-actually-does-across-a-suspend). |
+| USB suspend defect | **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. It took 12.6s to come back, which is the new number to design against. |
 | Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
 | Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
 | Display-off scoping | **Changed 2026-08-26, and the branch verified the same day.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. The Modern Standby laptop correctly reports `an idle screen blank turns the TV off (no usable suspend event on this machine)`. The blank itself has not been tested. |
@@ -727,6 +727,88 @@ three machines, before a single power event was tested. The brief's own summary
 of the position — "that is a syntax, type and symbol check, and **not** evidence
 that any of it behaves correctly" — turned out to be exactly right, and the
 distance between the two was four defects wide.
+
+### What the Modern Standby cycles actually showed
+
+Three real cycles happened on 2026-08-26 without anybody arranging them, and
+Windows' own `Kernel-Power` events date them exactly: standby at 19:20:22 for two
+minutes, again at 19:22:54 for **4h11m**, with a self-initiated maintenance wake
+at 21:15:54 in the middle of it. This is test 15 — the brief's largest open risk
+— run three times in its native habitat, and it passed. It also answered several
+things that were not being asked.
+
+**The ESP32 disappears across Modern Standby, and disabling selective suspend
+does not prevent it.** The device was removed 3 seconds after the display went
+off and did not return until the machine did:
+
+```
+[power] 19:22:54.721 display state = off
+[cmd] OFF sent and ACK received (display off)
+[power] 19:22:57.710 ESP32 removed
+[power] 23:34:08.044 display state = on
+[transport] ESP32 not found — skipping IR command: ON
+[cmd] ON FAILED — no ACK, TV state not changed (display on)
+[power] 23:34:20.673 ESP32 arrived
+[event] ESP32 reconnected — re-asserting on
+[cmd] ON sent and ACK received (ESP32 reconnected)
+```
+
+The per-device selective-suspend values were already in effect for that cycle —
+written at install and picked up by the re-enumeration at 19:22:31. They changed
+nothing, and could not have: this is the platform powering the controller down
+on the way into DRIPS, not a device idling into selective suspend. The installer
+is doing something worth doing for the *idle* case and nothing at all for this
+one, which is a sharper statement of "defence in depth rather than a fix" than
+the brief had.
+
+**The device-arrival path is not a nicety; it is the only thing that worked.**
+The wake `ON` failed — correctly, honestly, and with the TV left alone rather
+than recorded as on — because the device was still 12.6 seconds from coming
+back. Every later correction depended on the arrival notification added on
+2026-08-26 for exactly this reason. Without it the TV would have stayed off
+until the next display transition, which is what the brief predicted and is now
+the observed behaviour of the machine rather than a prediction about it.
+
+**12.6 seconds is the number to remember.** The brief guessed "a second later".
+Recovery after a long standby took twelve, against 0.4s after the two-minute
+one, so the gap scales with how deeply the machine slept. That is twelve seconds
+of a user looking at a dark TV after opening their laptop, and it is the largest
+remaining user-visible defect on this platform even though every component
+behaved exactly as designed.
+
+**Three finished features never fire on this machine at all.** No
+`PBT_APMSUSPEND`, therefore no away-time report, no grace-period measurement,
+and no suspend branch — across four hours of standby the log contains not one
+line from any of them. Two consequences, and the second is the awkward one:
+
+- The grace-period measurement, built to learn what a machine really allows,
+  can only ever report on machines that were never the concern.
+- **Away-time reporting was added so "a brief Modern Standby dip and an
+  overnight hibernate stop looking identical in the log" — and it is precisely
+  Modern Standby that cannot produce it.** The information is still recoverable
+  by subtracting two timestamps, so nothing is lost that matters; what is wrong
+  is that the feature was scoped to the event class that had a signal rather
+  than to the machines that needed the answer. Same shape as the five decisions
+  the sanity check reversed: correct about the path in front of it, aimed one
+  step wide of the problem.
+
+**A staleness guard fired, unprompted and correctly.** On the short cycle the
+arrival re-assert and the display coming on overlapped:
+
+```
+[power] 19:22:31.980 ESP32 arrived
+[event] ESP32 reconnected — re-asserting off
+[power] 19:22:32.007 display state = on
+[cmd] OFF sent and ACK received (ESP32 reconnected)
+[power] 19:22:32.133 power state changed mid-command — result discarded as stale
+[cmd] ON sent and ACK received (display on)
+```
+
+27ms apart. The re-asserted `OFF` was in flight when the display came back; its
+ACK arrived after the world had changed, was discarded rather than recorded as
+the TV's state, and the `ON` went out behind it. That is the three-way tracking
+— what the screen said, what the daemon concluded, what the TV confirmed —
+doing the job it was separated into three for, on a race nobody had constructed.
 
 ### Where the implementation departs from the plan
 
@@ -1578,13 +1660,13 @@ three separate sessions comparable afterwards.
 |---|---|---|---|---|
 | 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24, again 2026-08-26 |
 | 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | **yes**, 2026-08-26 |
-| 3 | Display returning turns the TV on | no | no | partly — asserted from the *registration* reading at every service start; a real display-off→on transition is untested |
-| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | no |
-| 4 | Sleep and wake, user-initiated | no | no | no |
+| 3 | Display returning turns the TV on | no | no | **yes**, 2026-08-26 — three times, on real resumes |
+| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **yes**, 2026-08-26 — `OFF sent and ACK received (display off)`, which is the right outcome against this machine's policy line |
+| 4 | Sleep and wake, user-initiated | no | no | not as written — three *idle-initiated* Modern Standby cycles passed; nobody has pressed Sleep |
 | 5 | Shutdown, then boot | no | no | no |
 | 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
-| 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | no |
-| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | partly — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up |
+| 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
+| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | **yes**, 2026-08-26 — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up; a send with no device logs `ON FAILED — no ACK, TV state not changed` rather than claiming success |
 | 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | **yes**, 2026-08-26 |
 | 10 | Unconfigured profile answering `ERR` | no | no | no |
 
@@ -1596,8 +1678,8 @@ three separate sessions comparable afterwards.
 | 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off |
 | 13 | Boot with Fast Startup **enabled** | any machine with hibernate |
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine |
-| 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only |
-| 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set |
+| 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
+| 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
 | 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF |
 
 Test 15 is not a formality: it is the one the
