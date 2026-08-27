@@ -612,7 +612,7 @@ boot — is still unexercised. Last worked on 2026-08-26 —
 | Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
 | Grace-period measurement | **New 2026-08-26, and it has produced its first number the same day: 206ms of 1500ms.** Each suspend send reports how many of its budgeted milliseconds it used. It only reports when a suspend send actually happens, which needs the suspend to arrive before the display-off `OFF` has been confirmed. |
-| USB suspend defect | **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. It took 12.6s to come back, which is the new number to design against. |
+| USB suspend defect | **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. The arrival came 12.6s after the display did, [once and unexplained](#what-the-modern-standby-cycles-actually-showed); every other reconnection in the log is between 0.4s and 3.5s. |
 | Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
 | Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
 | Display-off scoping | **Changed 2026-08-26, and the branch verified the same day.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. The Modern Standby laptop correctly reports `an idle screen blank turns the TV off (no usable suspend event on this machine)`. The blank itself has not been tested. |
@@ -776,17 +776,35 @@ back. Every later correction depended on the arrival notification added on
 until the next display transition, which is what the brief predicted and is now
 the observed behaviour of the machine rather than a prediction about it.
 
-**12.6 seconds is the number to remember.** The brief guessed "a second later".
-Recovery after a long standby took twelve, against 0.4s after the two-minute
-one. That is twelve seconds of a user looking at a dark TV after opening their
-laptop, and it is the largest remaining user-visible defect on this platform
-even though every component behaved exactly as designed.
+**A 12.6-second gap appeared once, and it is worth much less than it first
+looked.** On the resume from the 4h11m standby, `display state = on` and
+`ESP32 arrived` are 12.6s apart, and the `ON` in between failed. That was
+written up here as the platform's largest user-visible defect. It is not, and
+the rest of the log says why — every other transition is fast:
 
-The obvious explanation — that the gap scales with how deeply the machine slept
-— was written here and falsified the same night by the hibernate test, which
-cuts *more* power and reconnected with no removal at all. Whatever the twelve
-seconds is, it belongs to how Modern Standby handles the USB controller and not
-to how much power was taken away. See
+| Event | Gap |
+|---|---|
+| Bus cycle on the short standby resume | 0.4s |
+| Physical replug, three separate times | 2.7s, 3.4s, 3.5s |
+| Hibernate resume | no removal reported at all |
+| **The 4h11m standby resume** | **12.6s, once, never reproduced** |
+
+**And its cause was never established.** 12.6s matches neither the 0.4s bus
+cycle nor the ~3s a physical replug takes in this same log, and nothing in the
+daemon's record distinguishes "the USB stack took that long to restore after a
+long DRIPS" from "somebody plugged the device in at that moment". Nobody was
+watching the TV for it — it happened as the operator returned to a machine that
+had been asleep for four hours, three minutes before a replug they *did* watch,
+and their consistent report across every other transition all evening was that
+it acts near-instantly.
+
+Recorded as one unexplained sample rather than a finding. Worth resolving only
+if it recurs, and the way to resolve it is to resume from a long standby without
+touching the device.
+
+The first explanation offered for it — that the gap scales with how deeply the
+machine slept — was falsified the same night regardless, by the hibernate test
+cutting *more* power and reconnecting with no removal at all. See
 [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified).
 
 **No suspend event fires on the standby path.** Across four hours of standby the
