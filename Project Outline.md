@@ -1027,18 +1027,34 @@ Which of these it is has not been established:
 - fullscreen-exclusive presentation suppressing the timeout, in which case the
   game is protected the whole time it is running, controller or not.
 
-**The two possibilities differ enormously for a user and not at all in the log**,
-which is the same shape as every other problem this project has had. They are
-also cheap to tell apart: leave the game focused and fullscreen and do not touch
-the controller for seven minutes. If the screen blanks it was the input; if it
-does not it was the presentation mode.
+The game was in **borderless windowed** rather than exclusive fullscreen, which
+rules the second explanation out — a borderless window is a window, and Windows
+does not suspend the display timeout for one. That leaves gamepad input feeding
+the idle timer as the likely mechanism, and it was never confirmed, because the
+question stopped mattering.
 
-What can be said already is that `powercfg /requests` is **not** a reliable
-predictor of whether an application is safe from this policy. Firefox declares
-and is protected. Hollow Knight declares nothing and was also protected. An
-application that declares nothing and is *not* protected would be
-indistinguishable from the second case until the TV switched off — so the
-absence of a request cannot be used to warn anybody about anything.
+**Test 17 is closed as out of scope, and the row was wrong to exist.** The
+daemon mirrors whatever Windows does with the display; it does not influence it
+and must not. So if a game lets the display time out, the TV switches off — and
+a monitor sitting in the same place goes dark at the same instant. That is not
+the device misbehaving, it is the device doing the only thing it does. The row
+was written on the premise that the display-off policy might black out a TV
+somebody was watching, and that premise does not survive the observation that
+**when the display is off, the TV is showing nothing anyway**. There is nobody
+to protect.
+
+What survives is not a defect but an asymmetry in the cost of recovery: a
+blanked monitor returns in about a second of moving a mouse, while the TV needs
+an IR `ON`, a device that took [12.6 seconds](#what-the-modern-standby-cycles-actually-showed)
+to return after a long standby, and then the TV's own power-on. Same event,
+much larger bill. That belongs to recovery latency and not to this policy.
+
+One observation is worth keeping from the two runs: `powercfg /requests` is
+**not** a reliable predictor of whether an application will keep the display
+alive. Firefox declared a `DISPLAY` request and was protected; Hollow Knight
+declared nothing and was equally protected. Anyone tempted to build a
+warning — or a policy — on the presence of that request should know it reports
+one of several mechanisms and not the outcome.
 
 ### Where the implementation departs from the plan
 
@@ -1914,7 +1930,7 @@ three separate sessions comparable afterwards.
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine — **passed 2026-08-26** on the Modern Standby laptop (`boot type 0x2`), but *not as described*: the device never re-enumerated and the arrival re-assert never ran. See [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified) |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
-| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Both halves passed 2026-08-27.** Video: 35 minutes fullscreen, Firefox's `DISPLAY` request captured live. Game: Hollow Knight on a controller for 14 minutes, holding **no** request in any of 45 samples, and the screen still never blanked. The behaviour passes; the *mechanism* protecting the game is unidentified, and one of the two candidates still loses the TV if the controller is put down. See [what actually protects playback](#what-actually-protects-playback) |
+| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Closed as out of scope 2026-08-27.** Both halves passed on the way to that conclusion — Firefox 35 minutes with a `DISPLAY` request captured live, Hollow Knight 14 minutes on a controller with no request in any of 45 samples, neither blanking. But the row should not have existed: the daemon mirrors the display and does not influence it, so a display that times out mid-game takes a monitor dark exactly as it takes the TV off. See [what actually protects playback](#what-actually-protects-playback) |
 
 Test 15 is not a formality: it is the one the
 [largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
@@ -1937,7 +1953,7 @@ rather than discovered later.
 | **Installer scope** | Partly closed 2026-08-26: `install-service.ps1` now upgrades in place, stops and removes the running service first, cleans up its registry values on uninstall, and sets the log ACL. Still not an MSI — no per-user upgrade path, no rollback, no Add/Remove Programs entry, and it needs an execution-policy bypass to run at all. |
 | **Recovery policy detail** | `sc failure` takes actions for first, second and subsequent failures plus a reset period. The installer sets restart/5s three times with a one-day reset, which specifies all of them — but the decision of whether to *stop* retrying eventually is still unmade, and restarting forever is a choice by default rather than by intent. |
 | **The behaviour still differs by machine** | Scoping the display-off OFF removed the divergence on S3 machines, but a Modern Standby laptop still turns the TV off when its screen blanks and an S3 desktop does not. That is forced by the API rather than chosen, and it is not something a user can be expected to deduce. It needs a sentence in the user documentation that does not exist yet, and it is the one behaviour where "it works differently on my other PC" is a correct observation rather than a fault. |
-| **No way to override that** | The daemon has no configuration of any kind — no file, no registry values it reads, no flags beyond `--console`. Every policy in it is a compile-time decision. That is defensible while the audience is one person, and stops being defensible the moment somebody wants the screen blank ignored on their Modern Standby laptop and has no way to say so. The first thing that would need it is the display-off policy above. |
+| **No way to override that** | The daemon has no configuration of any kind — no file, no registry values it reads, no flags beyond `--console`. Every policy in it is a compile-time decision. **The case for an override got weaker on 2026-08-27, not stronger**: the two scenarios that motivated it — a game losing the TV mid-session, and music dying when the screen blanks — were both ruled [out of scope](#invariants), the first because a monitor blanks identically and the second because the TV is a display and not an audio device. What is left is a real but much smaller argument: somebody with an unusual setup and no way to say so. Worth revisiting when such a person appears rather than in anticipation of them. |
 | **Automated tests** | There are none, and Windows makes it two platforms verified by hand — now across three sleep models and two boot models. Every future change needs exercising several times over. A fake `ITransport` and a fake `IPowerMonitor` would cover the protocol and the state logic without hardware, which is where most of the matrix actually lives. The single command callback makes this materially cheaper than it was: a fake monitor now implements one method rather than five. This is the largest single gap on the list. |
 
 ---
@@ -2055,6 +2071,24 @@ history has the incidents. Breaking one of these is how the project regresses.
 - Every redirect of `stdout` or `stderr` is checked. An unredirected stream is a
   daemon talking to nobody, and it has no way to report that except the console
   it no longer has.
+
+**Scope** — settled 2026-08-27, after test 17 spent an evening outside it
+
+- **The daemon mirrors the display state. It never influences it.** No power
+  request is asserted, no timeout is extended, no application is inspected. If
+  Windows blanks the display the TV goes off, and the correct comparison is
+  always a monitor in the same place, which goes dark at the same instant.
+  Anything that would change *whether* the display blanks belongs in the user's
+  power settings.
+- Follows from that, and worth stating because it closes a whole class of
+  question: **an application that lets the display time out is not this
+  project's problem.** Games, players and anything else are judged only by what
+  they do to the display state, never by what they are doing.
+- **The TV is a display, not an audio device.** Audio is assumed to come from
+  something connected to the PC directly, so "the display is legitimately off
+  while the user is still listening" is not a case this device has to answer.
+  Without this line the display-off policy needs an override, and with it the
+  policy is simply correct.
 
 **Windows scripts**
 
