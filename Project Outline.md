@@ -73,26 +73,26 @@ sleep/wake/shutdown/boot cycle have all been exercised against the real device
 and daemon. Two items remain untested, neither on the power-sync path — see
 [Still unverified on hardware](#still-unverified-on-hardware).
 
-**Windows — installed and running as a service 2026-08-26; no power event yet
-exercised.** The daemon builds and links, and one binary now covers classic S3,
-hibernate (S4) and Modern Standby (S0 low power idle). It reports which of the
-three the machine is at startup, reacts to the ESP32 arriving and leaving, and
-measures how much of a suspend's grace period each send actually consumed. The
-first install, on the Modern Standby laptop, found
-[four defects](#the-first-install--four-defects) — three of which would have
-stopped anybody installing it at all — and after those it starts, identifies its
-own power model correctly, reads the display state at registration and survives
-repeated restarts. No suspend, resume, shutdown or boot has yet been run with it
-in place. Pick it up at [Resume here](#resume-here).
+**Windows — the Modern Standby machine is fully verified, 2026-08-27.** One
+binary covers classic S3, hibernate (S4) and Modern Standby (S0 low power idle).
+The first install found [four defects](#the-first-install--four-defects) — three
+of which would have stopped anybody installing it at all — and after those, every
+row that machine can answer has been answered: all eleven per-machine tests, plus
+Fast Startup boot, hibernate, a full Modern Standby cycle and an unattended wake.
+The suspend grace period has its first real measurement, 206ms of 1500ms. Two
+rows remain and both need an S3 machine with Fast Startup off. Pick it up at
+[Resume here](#resume-here).
 
 **Reviewed against the project's aims 2026-08-26, and two things changed.** The
 brief had grown detailed enough to be internally consistent while drifting from
 what the [Overview](#overview) table promises. Reading it back against those four
 rows found an idle screen blank turning the TV off on machines that had a better
 signal available, and a screen blank inheriting a suspend's 1500ms deadline
-while nothing was waiting for it. Both are fixed, in the brief and in the code;
-both are Windows-only and remain unrun like the rest of it. The full reasoning is
-under [the reversals](#five-decisions-the-sanity-check-reversed).
+while nothing was waiting for it. Both are fixed, in the brief and in the code,
+and both were exercised on 2026-08-27 — the display-off policy chose the right
+branch and every command in the log names its own trigger rather than
+inheriting `(sleep)`. The full reasoning is under
+[the reversals](#five-decisions-the-sanity-check-reversed).
 
 **Firmware flashed 2026-08-26, and Linux re-verified on it.** A full S3
 sleep/wake cycle behaves exactly as it did before — see
@@ -101,8 +101,9 @@ sleep/wake cycle behaves exactly as it did before — see
 The USB suspend recovery did **not** fire during that cycle, which the previous
 version of this brief predicted it would. The prediction was wrong and the
 reason is worth keeping: see
-[what Linux actually did](#what-linux-actually-does-across-a-suspend). The fix
-therefore remains unexercised on either platform.
+[what Linux actually did](#what-linux-actually-does-across-a-suspend). It was
+first exercised on Windows on 2026-08-26: the device is cycled across a Modern
+Standby resume, re-enumerates and answers.
 
 **Three things block any public release:**
 
@@ -533,14 +534,16 @@ so.
 
 ### Windows status
 
-**Running as a service; no power event yet exercised.**
+**Verified on Modern Standby hardware; unverified on S3.**
 `WindowsPowerMonitor.*` was rewritten on 2026-08-24 and finished on 2026-08-26,
 and installed for the first time later that day on the Modern Standby laptop —
 which found [four defects](#the-first-install--four-defects) and then started,
 reported its power model correctly, read the display state at registration and
-survived five consecutive restarts. What has still never happened is a suspend,
-a resume, a shutdown or a boot with the service in place, so every power event
-it handles remains an unverified assumption.
+survived five consecutive restarts. By the end of 2026-08-27 it had also handled
+sleeps, resumes, a shutdown, a Fast Startup boot, a hibernate, three Modern
+Standby cycles and an unattended maintenance wake, and every row that machine
+can answer had been answered. The power events it handles on an **S3** machine
+remain unverified assumptions, and two rows exist to settle them.
 
 The full picture, including which of the three power models each part covers, is
 in [Windows — in progress](#windows--in-progress).
@@ -628,8 +631,14 @@ links as a complete PE with every import resolving — `CallNtPowerInformation`
 from `POWRPROF.dll`, `RegisterDeviceNotificationW` and
 `RegisterPowerSettingNotification` from `USER32.dll`,
 `StartServiceCtrlDispatcherW` from `ADVAPI32.dll`. That is a syntax, type and
-symbol check, and **not** evidence that any of it behaves correctly. Every
-runtime assumption in it is still unproven.
+symbol check, and **not** evidence that any of it behaves correctly.
+
+That distinction was worth every word it took. The clean cross-compile and the
+resolving imports were both true on 2026-08-26, and the first install that day
+still found [four defects](#the-first-install--four-defects) in forty minutes —
+two of them in files no compiler reads. The runtime assumptions have since been
+proven on Modern Standby hardware, and by running the thing, which was the only
+way available.
 
 ### Three machines, not one
 
@@ -1120,10 +1129,12 @@ signal](#the-two-halves-of-the-display-signal-are-not-equally-safe).
 | **Idempotent installer** | Re-running it is an upgrade: the running service is stopped and deleted, with a poll for the deletion to land, before the new one is created. An installer that only works on a clean machine stops working on the second attempt, which is exactly when it is needed. |
 | **`verify-windows.ps1`** | Captures power model, service configuration, device state, selective-suspend values and the log tail into one report. What makes three sessions on three machines into one record. |
 
-**Why the device notifications are worth the code.** They land on the path the
-brief calls the largest open risk. The firmware re-enumerates itself after a USB
-suspend, so a wake `ON` issued while the device is still coming back fails —
-and the arrival a second later is what retries it. Without that, the TV stays
+**Why the device notifications are worth the code.** They landed on what was
+then the brief's largest open risk, and they are the reason it closed. The
+firmware re-enumerates itself after a USB suspend, so a wake `ON` issued while
+the device is still coming back fails — and the arrival is what retries it.
+Observed doing exactly that on 2026-08-26: an `ON` failed with no device
+present, and the arrival re-assert put the TV right. Without it the TV stays
 wrong until the next power event, which could be hours. The removal half is
 smaller but not nothing: it makes the log say *why* the handle was dropped, on
 the one path where a device vanishing and returning is routine.
@@ -1693,9 +1704,11 @@ function every power event uses. It is an exception in that function now.
   in a dark room. The handler now defers to the last known display state for
   that reason — watch the log for the `not asserting on` line, which says the
   guard fired and therefore that the risk was real.
-- **Display-state registration.** That it delivers the current value on
-  registration, and that `GUID_CONSOLE_DISPLAY_STATE` reaches a session-0
-  service. The boot ON depends on both.
+- ~~**Display-state registration.**~~ **Answered 2026-08-26, both halves.**
+  Registration delivers the current value — the first service start logged
+  `display state = on` and drove an `ON` from it within 2ms — and
+  `GUID_CONSOLE_DISPLAY_STATE` does reach a session-0 service, which every
+  display transition since has confirmed.
 - **The capability report is now load-bearing.** `AoAc` and `SystemS3` used to
   be diagnostics; they now decide whether an idle screen blank turns the TV off.
   Read the `display-off policy:` line on each of the three machines and confirm
@@ -1704,30 +1717,34 @@ function every power event uses. It is an exception in that function now.
   right direction (an unreadable capability set falls back to driving the OFF
   from the display, which errs towards the device doing its job) but it is no
   longer free.
-- **The ~2s grace period** is guidance, not a contract. Measure it. On Modern
-  Standby the equivalent question is how much runway a session-0 service gets
-  between display-off and the Desktop Activity Moderator throttling it.
-- **HID access as a service.** hidapi opens the device with `CreateFile`; confirm
-  that works under whichever account is chosen.
-- **USB across standby — the largest open risk.** The firmware now
-  re-enumerates itself after a suspend
-  (see [above](#usb-suspend--the-defect-the-windows-build-found)), which is
-  proven to be the right response to *idle* selective suspend. Modern Standby
-  suspends the bus regardless of any registry setting, and whether the same
-  recovery carries across it is untested. If it does not, the wake `ON` fails
-  after every standby — this device's main job on a laptop.
+- **The ~2s grace period** is guidance, not a contract. **First measurement
+  2026-08-27: 206ms of the 1500ms budget**, on a hibernate where the display-off
+  and the suspend arrived 41ms apart. It is only measurable when they collide
+  closely enough that the suspend send is not already suppressed. The Modern
+  Standby half of the question — how much runway a session-0 service gets before
+  the Desktop Activity Moderator throttles it — is still unmeasured, and has not
+  bitten yet.
+- ~~**HID access as a service.**~~ **Confirmed 2026-08-26.** hidapi's
+  `CreateFile` open works under LocalSystem; every command since has gone
+  through it. Whether it also works under LocalService is a separate question,
+  and it is the reason that account move is still on the list.
+- ~~**USB across standby — the largest open risk.**~~ **Closed 2026-08-26.**
+  The concern was that Modern Standby suspends the bus regardless of any
+  registry setting, and that the firmware's recovery
+  (see [above](#usb-suspend--the-defect-the-windows-build-found)) might not
+  carry across it — which would fail the wake `ON` after every standby, this
+  device's main job on a laptop.
 
-  Test by leaving the service running across a real standby cycle. Three
-  outcomes to tell apart in the log: `[usb] Resumed from suspend` on the serial
-  console with the ON succeeding is the fix working; a `WaitForSingleObject`
-  timeout that then recovers on a retry is the fix working slowly, and the
-  budget wants revisiting; a timeout that exhausts the budget means the resume
-  event never arrived and the firmware never knew to recover.
+  Three cycles ran. The device is cycled across the resume — removed and back
+  inside 0.4s on the short one, with nobody near the machine — re-enumerates,
+  and answers. The first of the three outcomes this section listed is what
+  happened: the fix working, at full speed, with no budget revision needed. The
+  fallback that had no fix in hand — forcing re-enumeration from the host with
+  the Windows configuration manager — is not required.
 
-  That last case is the one with no fix in hand. The fallback would be the
-  daemon forcing re-enumeration from the host with the Windows configuration
-  manager, which works but is Windows-only and leaves Linux with the same
-  defect unaddressed.
+  One thing the cycles did *not* settle: whether the device stays torn down for
+  the whole of a long standby. The only long absence in the log spans a physical
+  unplug and cannot be read as the platform's doing.
 
 - **Re-enumeration churn on Modern Standby — the risk the fix itself creates.**
   The firmware's recovery is written as costing nothing: *"a clean resume is
@@ -1860,10 +1877,13 @@ what was measured. What was measured is `power/control = on`: the kernel is not
 runtime-suspending that port at all, which is a stronger and more specific
 statement than "an open handle keeps it awake".
 
-**The consequence for the Windows work.** The firmware fix and the daemon's
-retry budget are both still entirely unexercised. A Modern Standby cycle is
-where they will first be tested for real, which makes it the largest open risk
-rather than merely the next item.
+**The consequence for the Windows work.** This made a Modern Standby cycle the
+largest open risk rather than merely the next item, because it was the first
+place the firmware fix and the daemon's retry path would be tested for real.
+**Settled 2026-08-26:** three cycles ran, the device was cycled across the
+resume and re-enumerated, and the daemon's arrival path recovered the `ON` that
+failed while it was away. The risk is closed; the Linux-side reproduction below
+is kept because it is still the only way to exercise the path *on Linux*.
 
 **A way to exercise it on Linux without waiting for Windows**, since nothing so
 far has: force the selective suspend the firmware is waiting for. The daemon's
@@ -1958,12 +1978,16 @@ three separate sessions comparable afterwards.
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
 | 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Closed as out of scope 2026-08-27.** Both halves passed on the way to that conclusion — Firefox 35 minutes with a `DISPLAY` request captured live, Hollow Knight 14 minutes on a controller with no request in any of 45 samples, neither blanking. But the row should not have existed: the daemon mirrors the display and does not influence it, so a display that times out mid-game takes a monitor dark exactly as it takes the TV off. See [what actually protects playback](#what-actually-protects-playback) |
 
-Test 15 is not a formality: it is the one the
-[largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
-the one most easily got wrong, because getting it wrong looks like nothing
-happening. Test 17 is the one an actual user is most likely to find first, and
-the only one on this list that tests a product decision rather than a mechanism
-— everything else can pass while the device is still unpleasant to live with.
+Test 15 was not a formality: it was the one
+[the largest open risk](#risks-to-check-on-the-real-machine) turned on, and
+passing it three times is what closed that risk. Test 16 was the one most
+easily got wrong, because getting it wrong looks like nothing happening — it
+passed by accident, on a maintenance wake nobody scheduled. Test 17 was written
+as the one an actual user would find first, and the only one testing a product
+decision rather than a mechanism; it was
+[closed as out of scope](#what-actually-protects-playback) instead, once it
+became clear the daemon mirrors the display and a monitor goes dark at the same
+instant the TV does.
 
 ### Gaps against a genuinely commercial Windows product
 
@@ -2498,14 +2522,20 @@ Two ways out, neither done:
 
 ### Windows implementation
 
-Still not listed here, and the reason has narrowed again. The first install on
-2026-08-26 produced four *observed* failures rather than guesses — and all four
-were fixed the same day, so they are recorded as
+Still nothing to list here, and the reason has changed twice. The first install
+on 2026-08-26 produced four *observed* failures rather than guesses, and all
+four were fixed the same day — recorded as
 [what the first install found](#the-first-install--four-defects) rather than as
-a backlog. What remains is once more a list of unverified assumptions: no
-suspend, resume, shutdown or boot has been run with the service installed. They
-live in [Windows — in progress](#windows--in-progress), alongside the
-[verification plan](#verification-plan) that is now four rows in.
+a backlog. Two days of testing after that produced **no further defects at
+all**: every remaining row on the Modern Standby machine passed on the first
+attempt, and what the testing changed was the brief rather than the code.
+
+What is left unverified is one machine class rather than a list of behaviours.
+An S3 suspend driving the OFF, and a true cold boot, have never run — see
+[Resume here](#resume-here). Both live in
+[Windows — in progress](#windows--in-progress) with the
+[verification plan](#verification-plan), which is now complete but for those two
+rows.
 
 Listing guesses here as though they were defects would put the two kinds of
 claim in the same table, which is the habit the
