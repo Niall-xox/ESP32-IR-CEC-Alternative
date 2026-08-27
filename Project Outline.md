@@ -1003,10 +1003,42 @@ game or a player that does not is not protected at all, and the daemon cannot
 tell the two apart — from where it sits, an undeclared video and an idle desktop
 are the same screen going dark.
 
-The remaining half of test 17 is exactly that case: a controller-driven game,
-where gamepad input does not reset the display idle timer the way a mouse does,
-so the request is the *only* thing standing between the player and a TV
-switching off mid-session.
+**And then the game half disproved the framing above.** Hollow Knight, played on
+a controller for 14 minutes against the same 5-minute timeout, held **no
+`DISPLAY` request at any point** — 45 samples, the game focused for 43 of them,
+`None.` in every one. The screen never blanked, and the daemon logged nothing.
+
+```
+01:02:39  hollow_knight     None.
+   ... 43 samples, all None, game focused throughout ...
+01:16:41  hollow_knight     None.
+=== daemon log lines written during the sample ===
+(none - the daemon logged nothing at all)
+```
+
+So the neat rule — declared apps are protected, undeclared apps are not — is
+wrong. Something kept the display alive for twelve minutes past the last
+keyboard or mouse input **without asserting anything Windows will report**.
+Which of these it is has not been established:
+
+- gamepad input feeding the idle timer after all, in which case a player who
+  puts the controller down for five minutes during a cutscene still loses the
+  TV; or
+- fullscreen-exclusive presentation suppressing the timeout, in which case the
+  game is protected the whole time it is running, controller or not.
+
+**The two possibilities differ enormously for a user and not at all in the log**,
+which is the same shape as every other problem this project has had. They are
+also cheap to tell apart: leave the game focused and fullscreen and do not touch
+the controller for seven minutes. If the screen blanks it was the input; if it
+does not it was the presentation mode.
+
+What can be said already is that `powercfg /requests` is **not** a reliable
+predictor of whether an application is safe from this policy. Firefox declares
+and is protected. Hollow Knight declares nothing and was also protected. An
+application that declares nothing and is *not* protected would be
+indistinguishable from the second case until the TV switched off — so the
+absence of a request cannot be used to warn anybody about anything.
 
 ### Where the implementation departs from the plan
 
@@ -1882,7 +1914,7 @@ three separate sessions comparable afterwards.
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine — **passed 2026-08-26** on the Modern Standby laptop (`boot type 0x2`), but *not as described*: the device never re-enumerated and the arrival re-assert never ran. See [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified) |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
 | 16 | An unattended wake leaving the TV **off** — wake timer or Wake-on-LAN | any; easiest where a wake timer can be set — **passed 2026-08-26** by accident rather than design: Windows woke itself at 21:15:54 for a maintenance window, re-entered standby five seconds later, and the daemon logged nothing at all. The display never came on, so nothing asserted `ON` |
-| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Video half passed 2026-08-27**: 35 minutes fullscreen against a 5-minute timeout, no dim, no blank, nothing logged, and Firefox's `DISPLAY` request captured live. **The game half is still open**, and it is the one that can fail — see [what actually protects playback](#what-actually-protects-playback) |
+| 17 | Playback the display-blank policy is supposed to protect: a browser-based video and a controller-driven game left running past the screen timeout. TV must stay on | Modern Standby only — the only machine where the blank drives an OFF. **Both halves passed 2026-08-27.** Video: 35 minutes fullscreen, Firefox's `DISPLAY` request captured live. Game: Hollow Knight on a controller for 14 minutes, holding **no** request in any of 45 samples, and the screen still never blanked. The behaviour passes; the *mechanism* protecting the game is unidentified, and one of the two candidates still loses the TV if the controller is put down. See [what actually protects playback](#what-actually-protects-playback) |
 
 Test 15 is not a formality: it is the one the
 [largest open risk](#risks-to-check-on-the-real-machine) turns on. Test 16 is
