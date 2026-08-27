@@ -592,13 +592,17 @@ daemon/
 
 ## Windows — in progress
 
-The current focus. **Installed and running as a service for the first time on
-2026-08-26**, on the Modern Standby laptop. That first install found
-[four defects](#the-first-install--four-defects), all fixed; three of them would
-have stopped anybody installing this at all, and none were visible to any
-compiler. Everything past service start — every suspend, resume, shutdown and
-boot — is still unexercised. Last worked on 2026-08-26 —
-[resume here](#resume-here).
+**The Modern Standby machine is finished.** Installed for the first time on
+2026-08-26 — a first install that found
+[four defects](#the-first-install--four-defects), three of which would have
+stopped anybody installing this at all, and none of which any compiler could
+see. By the end of 2026-08-27 every row that machine can answer had been
+answered: all eleven per-machine tests, plus 13, 14, 15 and 16, with 17 closed
+as out of scope.
+
+What is left is the **S3 machine**, and only two rows genuinely need it —
+[test 11 and test 12](#resume-here). Neither is reachable on hardware with no
+S3 and Fast Startup on, which is every machine tested so far.
 
 ### Where it stands
 
@@ -666,27 +670,31 @@ Standby, puts itself under the correct display-off policy, and reads
 `display state = on` at registration — which answers the design question the
 boot `ON` rested on.
 
-3. **The physical tests on this machine.** Everything left needs somebody at the
-   keyboard watching a TV, which is where the work now is. In rough order of
-   what they prove:
+~~3. **The physical tests on this machine.**~~ Done 2026-08-26 and 27. **Every
+row the Modern Standby laptop can answer, answers.** All eleven per-machine
+tests pass, plus 13, 14, 15 and 16; test 17 was
+[closed as out of scope](#what-actually-protects-playback). The largest open
+risk in the brief — a full Modern Standby cycle, test 15 — passed three times,
+one of them across 4h11m.
 
-   - **Replug the ESP32.** Owed anyway — the installer disables selective
-     suspend on the device instance and that needs a re-enumeration to take
-     effect. It is also test 7, and the arrival path is what the wake `ON`
-     depends on.
-   - **The screen blank** (test 3b, then 3), which on this machine is supposed
-     to turn the TV off — and then **test 17**, the video and the game left
-     running past the timeout, which is the one that decides whether that policy
-     is liveable rather than merely implemented.
-   - **A Modern Standby cycle** (test 15), the largest open risk and the only
-     test of the firmware's USB recovery.
-   - **Shutdown and boot** (test 5), then **hibernate and resume** (test 14):
-     this machine has hibernate, so it can answer 13 and 14 too, leaving only
-     the two genuinely S3-specific rows for the other box.
+4. **The S3 machine is where the work goes next**, and only two rows genuinely
+   need it. Both are rows no amount of testing here can ever reach:
 
-4. **Then run `verify-windows.ps1`** and keep the report, and **repeat on the
-   other two machines**, so each of S3, hibernate and Modern Standby is covered
-   by a machine that actually implements it.
+   - **Test 11** — `PBT_APMSUSPEND` *driving* the OFF. The event itself has now
+     fired on Modern Standby hardware, via a Fast Startup shutdown, but the
+     display-off always got there first and did the work. A machine where the
+     suspend arrives with no display change in front of it is the only place
+     that half can be observed.
+   - **Test 12** — a cold boot with Fast Startup **disabled**, the only true
+     cold boot there is. Every boot measured on this laptop was `boot type
+     0x1` or `0x2`: a resumed kernel session, never a fresh one.
+
+   Both need Fast Startup turned off on that machine, which is a setting rather
+   than a property — unlike the sleep model, which is firmware and cannot be
+   changed.
+
+5. **Run `verify-windows.ps1` on each machine** and keep the report. That is
+   what makes three sessions on three machines into one record.
 
 5. **The standby cycle** remains the largest single risk, and the one thing the
    firmware fix still has not been shown to survive. Three outcomes to tell
@@ -1936,7 +1944,7 @@ three separate sessions comparable afterwards.
 | 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
 | 8 | Graceful behaviour with the ESP32 absent entirely | no | no | **yes**, 2026-08-26 — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up; a send with no device logs `ON FAILED — no ACK, TV state not changed` rather than claiming success |
 | 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | **yes**, 2026-08-26 |
-| 10 | Unconfigured profile answering `ERR` | no | no | no |
+| 10 | Unconfigured profile answering `ERR` | no | no | **yes**, 2026-08-27 — both directions, and the OLED showed its no-IR-code message. `ESP32 returned ERR for command: OFF` → `OFF FAILED — no ACK, TV state not changed`, then the same for `ON`. The failure is reported at both layers and the TV's believed state is left alone |
 
 **Configuration-specific — only the machine that has it can answer:**
 
