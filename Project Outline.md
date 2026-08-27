@@ -698,9 +698,26 @@ one of them across 4h11m.
      cold boot there is. Every boot measured on this laptop was `boot type
      0x1` or `0x2`: a resumed kernel session, never a fresh one.
 
-   Both need Fast Startup turned off on that machine, which is a setting rather
-   than a property — unlike the sleep model, which is firmware and cannot be
-   changed.
+   Both need Fast Startup turned **off** on that machine, which is a setting
+   rather than a property — unlike the sleep model, which is firmware and cannot
+   be changed. Elevated, before installing anything:
+
+   ```powershell
+   powercfg /h off        # disables hibernate, and Fast Startup with it
+   ```
+
+   Confirm it took by reading the daemon's own opening lines rather than the
+   setting: `Fast Startup (Hiberboot)=no` in the capability report is the
+   statement that matters, because that is what the daemon acted on.
+
+   Note that `/h off` removes hibernate too, so tests 13 and 14 cannot be run in
+   that state — but both already passed on the Modern Standby laptop, so the S3
+   machine does not need to re-answer them. Turn it back on afterwards with
+   `powercfg /h on` if that machine is somebody's daily driver.
+
+   Everything else is the same as it was here: build, `--console`, install
+   elevated, work the table, then `verify-windows.ps1`. The
+   [Windows build section](#windows) has the commands.
 
 5. **Run `verify-windows.ps1` on each machine** and keep the report. That is
    what makes three sessions on three machines into one record.
