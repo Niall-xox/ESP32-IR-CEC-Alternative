@@ -80,8 +80,19 @@ of which would have stopped anybody installing it at all — and after those, ev
 row that machine can answer has been answered: all eleven per-machine tests, plus
 Fast Startup boot, hibernate, a full Modern Standby cycle and an unattended wake.
 The suspend grace period has its first real measurement, 206ms of 1500ms. Two
-rows remain and both need an S3 machine with Fast Startup off. Pick it up at
-[Resume here](#resume-here).
+rows remain and both need an S3 machine with Fast Startup off.
+
+**Windows — the S3 machine ran 2026-08-28, and the wake `ON` failed on it.**
+Both rows only that machine can answer passed, and it found
+[three defects](#the-s3-machine--2026-08-28) in paths Modern Standby cannot
+reach. The serious one is that the firmware's USB recovery never runs on an S3
+resume, so the TV stays dark after a wake until the device is replugged by hand.
+It is narrowed but not diagnosed: the device stays powered, Windows performs a
+correct port suspend, and no layer of the USB stack — Arduino events, TinyUSB's
+own callbacks, `tud_suspended()` — ever learns of it. **It has been seen on one
+machine**, whose single Intel xHCI cannot be separated from Windows itself,
+which is why the next step is a second S3 host rather than another firmware
+patch. Pick it up at [Resume here](#resume-here).
 
 **Reviewed against the project's aims 2026-08-26, and two things changed.** The
 brief had grown detailed enough to be internally consistent while drifting from
@@ -615,6 +626,15 @@ is**, and until it is fixed the wake `ON` — the single behaviour this device
 exists for — does not work on a desktop that sleeps to S3. Four rows on that
 machine remain unrun (3b, 6, 8 and 10); none of them is why the work stopped.
 
+**Except that "a desktop that sleeps to S3" is one desktop so far**, and the
+next move is to find out whether it is more than that. The AMD development
+machine defaults to `deep` and would be a second S3 host if Windows were
+installed on it; it was
+[assessed for that on 2026-08-28](#a-second-s3-machine--the-amd-desktop-assessed-2026-08-28)
+and is capable of it, with a drive the only real obstacle. Nothing has been
+installed and nothing is proven — the sentence above stands as written until a
+second machine says otherwise.
+
 ### Where it stands
 
 | | State |
@@ -715,19 +735,35 @@ machine is somebody's daily driver.
    on it; the machine where everything works differs in *both* operating system
    and hardware, so nothing so far separates the two.
 
-   - **Free first move:** `lspci -nn | grep -i usb` on the Linux machine. A
+   - ~~**Free first move:** `lspci -nn | grep -i usb` on the Linux machine. A
      similar-era Intel xHCI there would weaken the controller hypothesis
-     sharply, because near-identical hardware would then behave differently
-     under two operating systems.
-   - **The decisive test:** boot a Linux live USB **on the Windows machine**,
-     attach the device, suspend, resume, and write to the hidraw node. Same
-     controller, different OS, one variable. No install and no daemon needed.
+     sharply.~~ **Run 2026-08-28, and it did the opposite.** The Linux machine
+     is AMD throughout — a 600-series chipset controller `1022:43f7` plus three
+     CPU-attached Raphael/Granite Ridge controllers. Nothing like the Intel
+     `8086:A2AF`, so the two machines still differ in OS *and* controller
+     vendor, and the confound stands exactly where it was. The cheap shortcut
+     is spent; one of the two tests below has to be run.
+   - **The decisive test for the controller:** boot a Linux live USB **on the
+     Windows machine**, attach the device, suspend, resume, and write to the
+     hidraw node. Same controller, different OS, one variable. No install and
+     no daemon needed.
+   - **The decisive test for the product:** install Windows on the AMD desktop
+     and re-run the S3 rows there — same machine, both operating systems, with
+     the Linux half already in the record. It does not clear the Intel
+     controller, and it needs a drive; it does answer whether this fails
+     anywhere but that one box, using the real service rather than a raw
+     write. Assessed in full under
+     [the AMD desktop](#a-second-s3-machine--the-amd-desktop-assessed-2026-08-28)
+     — the machine defaults to `deep`, so it is a genuine S3 host, and it has
+     four independent controllers where the B250M has one.
 
-   If the endpoint survives there, the controller is cleared and the fault is
-   in how this device handles Windows' documented `PORT_SUSPEND` sequence — a
-   real product defect, and item 7 becomes necessary work. If it wedges there
-   too, the controller is the variable, this machine is simply a poor host, and
-   the honest output is a compatibility note rather than a protocol change.
+   If the endpoint survives on the Intel box under Linux, the controller is
+   cleared and the fault is in how this device handles Windows' documented
+   `PORT_SUSPEND` sequence — a real product defect, and item 7 becomes
+   necessary work. If it wedges there too, the controller is the variable, that
+   machine is simply a poor host, and the honest output is a compatibility note
+   rather than a protocol change. The AMD install reaches the same fork from the
+   other side: surviving there says "that box", wedging there says "Windows".
 
 6. **Then decide what item 7 is worth.** Do not design the keepalive before
    item 5 has an answer. The difference between the two outcomes is the
@@ -1514,6 +1550,113 @@ endpoint from a silent one. The one question none of the host-side evidence coul
 answer was whether the firmware was alive at all; the OLED and the button
 answered it, exactly as they did in the
 [original investigation](#usb-suspend--the-defect-the-windows-build-found).
+
+### A second S3 machine — the AMD desktop, assessed 2026-08-28
+
+The S3 failure has only ever been seen on one machine, and the proposal is to
+answer that by installing Windows on `nialls-pc` — the NixOS desktop this
+project is developed on, and the machine every Linux measurement in this brief
+was taken on. Assessed from Linux without installing anything; the install has
+not happened and nothing below is a result.
+
+**This is not the test [Resume here](#resume-here) item 5 describes, and it is
+worth being clear which question each one answers.** That test — a Linux live
+USB booted on the Intel box — holds the *controller* fixed and varies the OS,
+which is what isolates the controller. This one holds the *machine* fixed and
+varies the OS, on a machine whose Linux half is already recorded as working. It
+cannot clear the Intel controller. What it answers instead is the question the
+product actually turns on: does a Windows S3 suspend wedge this device anywhere
+other than that one box? It is also the stronger of the two in one respect — it
+runs the real service through real power events, where the live USB only writes
+to a hidraw node.
+
+**What the machine reports.**
+
+| | |
+|---|---|
+| Board | ASUS ROG STRIX B650E-I GAMING WIFI, BIOS 1809 (2023-09-28) |
+| CPU / RAM | AMD Ryzen 5 7600, 32 GB |
+| Sleep states | `/sys/power/state` = `freeze mem disk`; `/sys/power/mem_sleep` = `s2idle [deep]` |
+| USB controllers | **Four, independent.** AMD 600-series chipset `1022:43f7` (`09:00.0`), CPU Raphael/Granite Ridge `1022:15b6` (`0c:00.3`) and `1022:15b7` (`0c:00.4`), CPU USB 2.0 `1022:15b8` (`0d:00.0`) — seven root hubs between them |
+| Firmware | UEFI, TPM 2.0 present (`tpm0`, `tpm_version_major = 2`), Secure Boot currently **disabled** |
+| Storage | One 2 TB NVMe (`CT2000P3PSSD8`), fully allocated — 1 GB ESP at `/boot` (973 MB free) and a 1.8 TB ext4 root (1.1 TB free *inside* the filesystem). No unpartitioned space and no second drive |
+
+**It is an S3 machine, which is the part that decides whether the exercise is
+worth anything.** `deep` is not merely available, it is the kernel's default —
+and the kernel prefers `s2idle` when the firmware advertises Low Power S0 Idle.
+So this board is not advertising Modern Standby, and Windows on it should land
+in the third configuration: `S3=yes`, `Modern Standby (AoAc)=no`. Take that as
+the expectation and not the record: the daemon prints its own capability report
+in one line, and *that* line is what belongs in the table, exactly as it was for
+the B250M box. The FADT flag itself was not read — `dmesg` is restricted on this
+machine — so the reasoning above rests on the kernel's default choice rather
+than on the firmware table.
+
+**Windows 11 will install.** UEFI boot, TPM 2.0 already present, and a Ryzen
+7600 on Microsoft's supported CPU list. Secure Boot is off and has to be enabled
+in the BIOS first.
+
+**The obstacle is storage, not capability.** One drive, no free space outside
+the filesystem. Three ways round it, and they are not equal:
+
+1. **A second NVMe.** The clean answer: the two operating systems own separate
+   disks, nothing touches the working NixOS install, and the Linux half of the
+   comparison stays runnable. Whether a second M.2 slot is free is a question
+   for the board itself, not for anything readable from Linux.
+2. **Shrink the ext4 root offline** from a live USB. Free, and there is 1.1 TB
+   spare — but it operates on the only filesystem the development machine has,
+   and a restore is a longer detour than the test is worth.
+3. **Reuse the disk entirely.** Cheapest to start and the worst value, because
+   it destroys the thing that makes this machine interesting.
+
+The existing 1 GB ESP is large enough to hold a Windows boot loader beside
+systemd-boot, so a dual boot does not need a second one. Windows will make
+itself the default boot entry; that is expected, and the BIOS boot order undoes
+it.
+
+**Keeping the NixOS install is the point, not a convenience.** The Linux S3
+cycle in [what Linux actually does](#what-linux-actually-does-across-a-suspend)
+was measured on this hardware. Keeping it means the two halves of the comparison
+are the same controller, the same ports and the same device, with the Linux half
+re-runnable at any time to confirm the hardware has not changed underneath the
+result. That is the whole argument for option 1 over option 3.
+
+**Four independent controllers is what the Intel box could not offer.** The
+B250M has a single xHCI serving every port, which is why three ports there was
+[one controller three times](#what-windows-actually-does-and-where-that-puts-the-fault)
+and a controller-level quirk could not be ruled out on it. Here the chipset
+controller and the CPU-attached controllers are separate silicon on separate
+PCIe functions. Test at least one chipset port (`09:00.0`) and one CPU port
+(`0c:00.3` or `0c:00.4`), and record which the device was on — if it wedges on
+one and survives another, that is a controller result rather than an OS result,
+obtained on one machine in one session.
+
+**What each outcome means.** The hypothesis being tested is that the S3 wedge is
+specific to the B250M box. It is currently a belief with no evidence either way,
+and the setup does not favour either answer:
+
+- **The device survives an S3 cycle here.** The wedge is a property of that
+  machine, the honest output is a compatibility note rather than a protocol
+  change, and item 7 — the liveness keepalive — becomes optional work. The
+  Intel box stays unexplained, and should be recorded as unexplained rather
+  than as solved.
+- **It wedges here too.** The fault is Windows-generic, reproduced on a second
+  controller vendor and a second chipset generation, and item 7 becomes
+  necessary. That is a stronger and more useful result than the Intel box alone
+  could produce, and it is worth wanting.
+
+**A free precursor that needs no install at all.** The forced selective-suspend
+reproduction already written down for
+[Linux](#what-linux-actually-does-across-a-suspend) has never been run. It
+exercises the firmware's recovery path against *these* controllers today, from
+the OS already on the disk, and a failure there would be a firmware finding
+obtained for the cost of four commands. Run it before buying a drive.
+
+**Before any of this counts, on the Windows side:** `powercfg /h off` for test
+12, Fast Startup off, the installer's selective-suspend registry values applied
+— without them `--console` cannot pass at all, as the B250M bring-up found the
+hard way — and `verify-windows.ps1` run and kept, which is still not done on the
+first S3 machine either.
 
 ### Checked against both platforms' documentation — 2026-08-28
 
@@ -2430,6 +2573,16 @@ What this means in practice:
 | **Hibernate (S4)** | ~~That a resume after full power loss to the device re-establishes the transport. The ESP32 *will* have re-enumerated, so this is the cheapest real test of the device-arrival path.~~ **Wrong, and shown to be on 2026-08-26.** The ESP32 did not re-enumerate: no removal, no arrival, the handle survived and the first `ON` was ACKed. What this machine class actually proves is the opposite — that a hibernate is *less* disruptive to USB than a Modern Standby cycle |
 | **Modern Standby** | The DRIPS cycle, the display-state signal in its native habitat, and whether the firmware's USB recovery survives a bus suspend that no registry setting prevents |
 
+**A fourth axis appeared on 2026-08-28, and it is not a sleep model.** The S3
+failure needs a *second S3 machine* to say whether it is Windows or that
+particular box, and no amount of testing on the B250M can supply one. A second
+S3 host is therefore now a distinct thing hardware can prove, separate from the
+three configurations above: it holds the sleep model constant and varies the
+controller and the chipset generation. The AMD desktop is the candidate — see
+[the AMD desktop](#a-second-s3-machine--the-amd-desktop-assessed-2026-08-28).
+Its four independent USB controllers mean it can also vary the controller
+*within* one machine, which the B250M's single xHCI made impossible.
+
 Two things remain measurements rather than pass/fail, and both need the real
 hardware:
 
@@ -3045,7 +3198,7 @@ All three were found in one session on the S3 machine — see
 
 | Issue | Notes |
 |---|---|
-| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here, and **not yet diagnosed** — four instrumented builds narrowed it without closing it; see [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped). The open question is whether the device power-cycles during S3, because that decides whether any firmware fix is possible at all. Settled 2026-08-28: the device stays powered and running, and **no layer of the USB stack ever learns of the suspend** — not the Arduino events, not TinyUSB's own callbacks, not `tud_suspended()`. Windows is meanwhile doing a correct port suspend/resume, and the device fails the HLK requirement `MustResumeWithoutForcedReset`. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
+| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here, and **not yet diagnosed** — four instrumented builds narrowed it without closing it; see [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped). The open question is whether the device power-cycles during S3, because that decides whether any firmware fix is possible at all. Settled 2026-08-28: the device stays powered and running, and **no layer of the USB stack ever learns of the suspend** — not the Arduino events, not TinyUSB's own callbacks, not `tud_suspended()`. Windows is meanwhile doing a correct port suspend/resume, and the device fails the HLK requirement `MustResumeWithoutForcedReset`. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. **Seen on one machine only**, and whether that generalises is unsettled: the working Linux machine is AMD throughout, so OS and controller vendor still vary together and nothing separates "Windows does this" from "that box does this". Settling it needs a second S3 host — see [the AMD desktop](#a-second-s3-machine--the-amd-desktop-assessed-2026-08-28). Until then this row is a defect observed on one configuration, not a characterised product defect. |
 | **The suspend grace-period measurement spans the suspend** | It reports wall-clock across a period when the CPU was not running, so the figure it prints is the sleep duration: `18732ms` against a 20s sleep, `4640ms` against a 5s one. A reader who trusts it concludes the 1500ms budget is hopeless, which is not what happened. Same category as the `(sleep)` mislabelling removed on 2026-08-26 — a plausible number where somebody would look for an answer. Either measure across the send only, or do not print a number. |
 | **A failed send is never retried** | A lost ACK leaves the daemon's believed TV state wrong until an unrelated event corrects it. Declining to record an unconfirmed state is correct and should stay; the gap is that nothing re-attempts. On Modern Standby the device arrival supplied that retry by accident. |
 
