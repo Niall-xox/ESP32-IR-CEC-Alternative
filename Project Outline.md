@@ -702,40 +702,47 @@ found [three defects](#the-s3-machine--2026-08-28), which is what the rest of
 this list is now about. Turn hibernate back on with `powercfg /h on` if that
 machine is somebody's daily driver.
 
-5. **Fix the firmware's USB recovery on the S3 path.** The blocker, and the
-   reason this is no longer a testing list. The recovery never runs on an S3
-   resume: no removal, no arrival, and the device comes back with a wedged OUT
-   endpoint, so the wake `ON` fails and the TV stays off until somebody replugs
-   it. Establish first *whether the handler fires at all* — whether
-   `ARDUINO_USB_SUSPEND_EVENT` is delivered on this path, and whether
-   `serviceUsbRecovery()` reaches `tud_disconnect()`. The OLED is the instrument
-   that settles it, as it was for the
-   [original investigation](#usb-suspend--the-defect-the-windows-build-found).
-   Do not tune anything until that question has an answer; the two candidate
-   causes need opposite fixes.
+5. **Settle whether the ESP32 power-cycles during an S3 suspend.** One cycle,
+   one number, and it decides whether the blocker is fixable in firmware at all.
+   Flash a build that increments a boot counter in NVS at startup and shows it
+   on the OLED; read it before the sleep and after the wake. Unchanged means the
+   device stayed up and a firmware fix is possible; incremented means it lost
+   power, the firmware is not running when it matters, and the fix has to be
+   host-side or hardware. **Do not write another patch before this number
+   exists** — four builds were spent on 2026-08-28 without it, and two of them
+   were testing hypotheses the number would have eliminated. See
+   [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped).
 
-6. **Fix the grace-period measurement, or stop printing a number.** It spans the
+6. **If it stays powered: try `tud_suspend_cb()` / `tud_resume_cb()`.**
+   TinyUSB's own weak callbacks, never tried. Polling `tud_suspended()` proved
+   TinyUSB's state machine tracks the transition even where the Arduino event
+   layer delivers nothing, so the callbacks it drives are the most likely
+   trigger that actually fires. Note that a polled trigger alone was tried and
+   did not fix the symptom, so a working trigger is necessary and may not be
+   sufficient.
+
+7. **Fix the grace-period measurement, or stop printing a number.** It spans the
    suspend and reports the sleep duration. Two samples say so unambiguously.
    Measure across the send alone, and note that on Windows the machine can go
    down mid-send — a send that never completed has no duration to report, and
    saying so is better than a number.
 
-7. **Decide whether a failed send should be retried.** A lost ACK currently
+8. **Decide whether a failed send should be retried.** A lost ACK currently
    leaves the believed TV state wrong until something unrelated corrects it.
    Declining to record an unconfirmed state should stay. What is missing is a
    re-attempt, and the suspend path is the awkward case: there may be no time
    for one before the machine goes.
 
-8. **Finish the four unrun rows on the S3 box** — 3b, 6, 8 and 10. None is why
+9. **Finish the four unrun rows on the S3 box** — 3b, 6, 8 and 10. None is why
    the work stopped, and 3b is the more interesting of them: it is the only
    machine where the *ignored*-blank branch can be watched, and the TV should
    stay on.
 
-9. **Run `verify-windows.ps1` on each machine** and keep the report. That is
+10. **Run `verify-windows.ps1` on each machine** and keep the report. That is
    what makes three sessions on three machines into one record. Not yet run on
    the S3 box.
 
-10. **The standby cycle** is no longer the largest single risk — item 5 is. It
+11. **The standby cycle** is no longer the largest single risk — item 5 is. It
     remains the case that the firmware fix has never been shown to run on any
     platform; what the Modern Standby cycles show is that the *platform* cycled
     the device and the arrival re-assert did the work.
@@ -1211,6 +1218,76 @@ pass.
 The failure lands on the configuration this device most plausibly ships into: a
 desktop connected to a television, which sleeps to S3 and wakes with the TV
 still off.
+
+#### Four builds chasing it, and where it stopped
+
+The recovery not running was established. *Why* it does not run was chased
+through four instrumented firmware builds the same day and is **not** settled.
+Recorded in full because the sequence contains two wrong conclusions of mine,
+and because the surviving hypothesis is testable in one cycle by whoever picks
+this up.
+
+The board has no serial port to spare — `ARDUINO_USB_MODE=0` gives the USB
+peripheral to TinyUSB — so every measurement below was read off the OLED after
+the fact, via a counter shown in place of the profile name on a button press.
+
+| Build | Measured | What it established |
+|---|---|---|
+| 1 | `S0 R0 X0` | `ARDUINO_USB_SUSPEND_EVENT` and `ARDUINO_USB_RESUME_EVENT` are never delivered on an S3 resume. The recovery is dead code on this path. |
+| 2 | `S0R0X0P2U4` | TinyUSB's own `tud_suspended()` saw **both** transitions in the same cycle the event layer saw none — on a device with four minutes of uptime that had plainly not rebooted, corroborated by the OLED not lighting itself. |
+| 3 | polled trigger, no counters | Drove the existing recovery from the polled edge instead of the event. **No effect.** No device arrival reached the daemon, and the TV stayed off. |
+| 4 | `X0P0U0`, 2s delay added | Delayed the re-enumeration so the host could finish resuming first. **No effect** — and the counters came back zero, contradicting build 2. |
+
+**Two conclusions of mine that did not survive.** The first was that the
+`delay(100)` was racing the host's own resume; build 1's zeros ruled that out,
+because the code never got that far — and then build 3 revived it, because a
+polled trigger does reach it. The second is worse: build 2's `U4` was read as
+settling that the device does not reboot across a suspend, and that premise was
+carried through two more builds. It was one sample.
+
+**The one hypothesis that fits every reading.** Build 4's `X0 P0 U0` has a
+second interpretation: not "nothing happened" but "everything happened and the
+counters were reset", which is what a power cycle looks like to any counter held
+in RAM. If VBUS is marginal on this machine's ports in S3 — dropping on some
+cycles and not others — then both results are true. Build 2 measured a cycle
+where the device stayed powered; build 4 measured one where it did not.
+
+That would also explain the wedge itself, and by a different mechanism from the
+one this section has assumed throughout. A device that power-cycles during S3
+re-enumerates while the host is asleep and nobody is listening. Windows resumes
+holding a cached device object for an instance that no longer exists, writes go
+to a stale endpoint, and the symptom is identical to a suspended device that
+failed to recover — `hid_open` succeeding, every write NAKing, only a physical
+replug clearing it.
+
+**This changes whether the defect is fixable in firmware at all**, which is why
+it is worth one more cycle rather than another patch:
+
+- If the device stays powered, the firmware can detect and repair the condition,
+  and the remaining work is finding a trigger that fires — `tud_suspend_cb()` /
+  `tud_resume_cb()`, TinyUSB's own weak callbacks, are the obvious next
+  candidate and were never tried, since the polled state proves TinyUSB's
+  machine is tracking the transition.
+- If the device power-cycles, **no firmware can help**, because the firmware is
+  not running when it matters. The fix would have to be the host re-enumerating
+  properly on resume, or the port keeping VBUS up.
+
+**A boot counter in NVS settles it**, since it survives both a reset and a power
+loss where no RAM counter can. Read it before and after one sleep: unchanged
+means the device stayed up and the firmware route is live; incremented means it
+power-cycled and the firmware route is closed. A build doing this was written
+and compiled on 2026-08-28 and not run — it needs somebody at the machine to
+read the OLED before and after.
+
+**Host-side recovery is not the answer either**, tested the same day and
+recorded so it is not tried again. `pnputil /restart-device` cycles Windows'
+device object in about 3ms without touching the device's USB state, and the
+wedge survives it — confirmed with the service stopped, so nothing was holding
+the handle. On this machine the command also reported `This command is not
+supported on this OS product` on a second invocation: it is **Windows 11 Home**,
+which is exactly the edition a PC-connected-to-a-television is most likely to be
+running. The fallback the brief describes as "not required" is both ineffective
+here and unreliable to call.
 
 #### The grace-period measurement spans the suspend
 
@@ -2729,7 +2806,7 @@ All three were found in one session on the S3 machine — see
 
 | Issue | Notes |
 |---|---|
-| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
+| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here, and **not yet diagnosed** — four instrumented builds narrowed it without closing it; see [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped). The open question is whether the device power-cycles during S3, because that decides whether any firmware fix is possible at all. One cycle with an NVS boot counter settles it. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
 | **The suspend grace-period measurement spans the suspend** | It reports wall-clock across a period when the CPU was not running, so the figure it prints is the sleep duration: `18732ms` against a 20s sleep, `4640ms` against a 5s one. A reader who trusts it concludes the 1500ms budget is hopeless, which is not what happened. Same category as the `(sleep)` mislabelling removed on 2026-08-26 — a plausible number where somebody would look for an answer. Either measure across the send only, or do not print a number. |
 | **A failed send is never retried** | A lost ACK leaves the daemon's believed TV state wrong until an unrelated event corrects it. Declining to record an unconfirmed state is correct and should stay; the gap is that nothing re-attempts. On Modern Standby the device arrival supplied that retry by accident. |
 
