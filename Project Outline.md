@@ -713,36 +713,46 @@ machine is somebody's daily driver.
    were testing hypotheses the number would have eliminated. See
    [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped).
 
-6. **If it stays powered: try `tud_suspend_cb()` / `tud_resume_cb()`.**
-   TinyUSB's own weak callbacks, never tried. Polling `tud_suspended()` proved
-   TinyUSB's state machine tracks the transition even where the Arduino event
-   layer delivers nothing, so the callbacks it drives are the most likely
-   trigger that actually fires. Note that a polled trigger alone was tried and
-   did not fix the symptom, so a working trigger is necessary and may not be
-   sufficient.
+~~6. **Try a different physical connection.**~~ Done 2026-08-28: three ports,
+   motherboard and case headers, committed firmware, identical failure on all
+   three. The connection path is not the variable. A hub specifically was not
+   available and remains the only untried form of this.
 
-7. **Fix the grace-period measurement, or stop printing a number.** It spans the
+7. **Accept that no USB-state trigger can work, and design around it.** All
+   three were measured silent on 2026-08-28 — the Arduino events, TinyUSB's own
+   `tud_suspend_cb()` / `tud_resume_cb()`, and `tud_suspended()` itself. The
+   remaining option is a liveness timeout: the daemon sends a periodic
+   keepalive and the firmware re-enumerates after several intervals of total
+   silence, which is the wedged signature and needs nothing from the USB stack.
+   Two things must be designed in from the start rather than discovered:
+   **Linux** sends nothing while idle, so the timeout must arm only after the
+   first keepalive is seen or the device will re-enumerate continuously there;
+   and **Modern Standby** throttles a session-0 service, so keepalives may stop
+   during standby and trigger exactly the [re-enumeration
+   churn](#risks-to-check-on-the-real-machine) already recorded as a risk.
+
+8. **Fix the grace-period measurement, or stop printing a number.** It spans the
    suspend and reports the sleep duration. Two samples say so unambiguously.
    Measure across the send alone, and note that on Windows the machine can go
    down mid-send — a send that never completed has no duration to report, and
    saying so is better than a number.
 
-8. **Decide whether a failed send should be retried.** A lost ACK currently
+9. **Decide whether a failed send should be retried.** A lost ACK currently
    leaves the believed TV state wrong until something unrelated corrects it.
    Declining to record an unconfirmed state should stay. What is missing is a
    re-attempt, and the suspend path is the awkward case: there may be no time
    for one before the machine goes.
 
-9. **Finish the four unrun rows on the S3 box** — 3b, 6, 8 and 10. None is why
+10. **Finish the four unrun rows on the S3 box** — 3b, 6, 8 and 10. None is why
    the work stopped, and 3b is the more interesting of them: it is the only
    machine where the *ignored*-blank branch can be watched, and the TV should
    stay on.
 
-10. **Run `verify-windows.ps1` on each machine** and keep the report. That is
+11. **Run `verify-windows.ps1` on each machine** and keep the report. That is
    what makes three sessions on three machines into one record. Not yet run on
    the S3 box.
 
-11. **The standby cycle** is no longer the largest single risk — item 5 is. It
+12. **The standby cycle** is no longer the largest single risk — item 5 is. It
     remains the case that the firmware fix has never been shown to run on any
     platform; what the Modern Standby cycles show is that the *platform* cycled
     the device and the arrival re-assert did the work.
@@ -1263,17 +1273,45 @@ replug clearing it.
 **This changes whether the defect is fixable in firmware at all**, which is why
 it is worth one more cycle rather than another patch:
 
-- If the device stays powered, the firmware can detect and repair the condition,
-  and the remaining work is finding a trigger that fires — `tud_suspend_cb()` /
-  `tud_resume_cb()`, TinyUSB's own weak callbacks, are the obvious next
-  candidate and were never tried, since the polled state proves TinyUSB's
-  machine is tracking the transition.
+- If the device stays powered — which the LEDs say it does — the firmware can
+  detect and repair the condition, and the remaining work is finding a trigger
+  that fires. `tud_suspend_cb()` / `tud_resume_cb()`, TinyUSB's own weak
+  callbacks, are the strongest untried candidate.
+
+  **Tried on 2026-08-28, and they never fire either.** An application
+  definition of each links cleanly and overrides the core's, because `usbd.h`
+  declares them `TU_ATTR_WEAK`. Neither was called across a full cycle. That
+  closes the trigger question rather than answering it: nothing in TinyUSB's
+  device stack learns about the suspend, so no trigger built on USB state can
+  work. See [what Windows actually
+  does](#what-windows-actually-does-and-where-that-puts-the-fault).
 - If the device power-cycles, **no firmware can help**, because the firmware is
   not running when it matters. The fix would have to be the host re-enumerating
   properly on resume, or the port keeping VBUS up.
 
-**A boot counter in NVS settles it**, since it survives both a reset and a power
-loss where no RAM counter can. Read it before and after one sleep: unchanged
+**Contradicted the same day, by looking at the device.** The ESP32 shows a solid
+red power LED and a flashing blue one; the firmware drives neither, as it
+contains no LED code at all. Through a full S3 suspend **both stay lit and
+unchanged**, so VBUS is maintained on this machine's ports and the board is not
+losing power. The hypothesis above is the tidiest explanation of the counters and
+it is not what is happening.
+
+Two things it does not prove, and they are why the boot counter below is still
+worth reading: a lit power LED shows VBUS is present, not that the MCU never
+reset — a brownout or watchdog reset leaves the LED on and zeroes every RAM
+counter just the same — and nothing in this project drives the blue LED, so its
+flashing is uninterpreted.
+
+What this leaves is the original contradiction, sharpened. If there is no power
+cycle, build 4's `P0` means the polled edge genuinely was not seen, against
+build 2's `P2`. The code did not differ in any way that matters. **The sessions
+did**: build 2 ran four minutes before sleeping, build 4 slept **seven seconds
+after the device was replugged**, with Windows barely finished enumerating it.
+Settle time is the untested variable, and it was left untested because the
+instruction given for that cycle did not mention one.
+
+**A boot counter in NVS is still the thing to read**, since it survives both a
+reset and a power loss where no RAM counter can. Read it before and after one sleep: unchanged
 means the device stayed up and the firmware route is live; incremented means it
 power-cycled and the firmware route is closed. A build doing this was written
 and compiled on 2026-08-28 and not run — it needs somebody at the machine to
@@ -1288,6 +1326,80 @@ supported on this OS product` on a second invocation: it is **Windows 11 Home**,
 which is exactly the edition a PC-connected-to-a-television is most likely to be
 running. The fallback the brief describes as "not required" is both ineffective
 here and unreliable to call.
+
+#### What Windows actually does, and where that puts the fault
+
+Checked against Microsoft's documentation on 2026-08-28, after four builds spent
+assuming the device was owed a notification it was not getting. The
+documentation reframes the defect, and not in this project's favour.
+
+**Windows does not cut power or re-enumerate across S3.** The bus driver
+suspends the port by setting `PORT_SUSPEND` on the way down, and resumes it by
+clearing `PORT_SUSPEND` on the way back — an ordinary USB bus suspend with VBUS
+maintained throughout. That matches what the board's own LEDs show, and it means
+the host is doing exactly what it should. The notification the firmware never
+receives is one the host is genuinely sending.
+
+**Windows names this failure as a certification requirement.** The HLK test
+*USB Device Connection S3+S4+Connected Standby* enforces, among others:
+
+```
+Device.Connectivity.UsbDevices.MustBeFunctionalAfterResume
+Device.Connectivity.UsbDevices.MustResumeWithoutForcedReset
+```
+
+The second is worth reading twice, because this project's entire recovery
+mechanism is a forced reset. `tud_disconnect()` / `tud_connect()` is precisely
+the thing that specification says must not be necessary. The firmware fix
+recorded since 2026-08-24 as the answer to the USB suspend defect is, in
+Microsoft's terms, the definition of the failure rather than a remedy for it.
+That does not make it the wrong thing to ship — a device that recovers itself is
+better than one that does not — but it should be recorded as a workaround for a
+device that would fail certification, not as a design.
+
+**The fault is below the Arduino layer.** `USB.cpp` in the Arduino core defines
+`tud_suspend_cb()` and `tud_resume_cb()` correctly and posts
+`ARDUINO_USB_SUSPEND_EVENT` / `ARDUINO_USB_RESUME_EVENT` from them; the wiring is
+not missing. The 2026-08-28 measurement build replaced both with its own
+definitions — which links cleanly, because `usbd.h` declares them `TU_ATTR_WEAK`
+and the core's definitions inherit that linkage — and **neither was ever
+called**, across a cycle in which the MCU ran continuously for 208 seconds and
+never rebooted. `tud_suspended()` never changed either, and that flag is set by
+TinyUSB's own device stack when the controller driver reports a suspend.
+
+So nothing from the port suspend reaches TinyUSB's device stack at all. The
+device controller driver for this silicon is not reporting it. The bundled
+TinyUSB is **0.16.0**, shipped precompiled in `libarduino_tinyusb.a` with no
+`dcd_esp32sx` source in the package.
+
+**How strong is the platform-bug explanation?** Weaker than it first looked, and
+stated here at its real strength so nobody spends a re-verification cycle on it
+without knowing. There is one open `arduino-esp32` issue — #10831, "the device
+never enters USB suspend mode when the host (PC) is put to sleep" — reported
+against Arduino core 2.0.17 *and* 3.1.0, still labelled "Needs investigation".
+This project is on 2.0.17 (`framework-arduinoespressif32 @ 3.20017`). That the
+report spans both major core generations is the useful part: **bumping the
+pinned platform would move from one affected version to another**, at the cost
+of re-verifying the whole firmware on hardware, with no reason to expect a
+different outcome.
+
+But it is one report, its author sees a *disconnect* where this project sees
+nothing at all, and a search of TinyUSB's issue tracker and its 0.17 and 0.18
+changelogs turned up no documented ESP32-S3 suspend-detection fix. The
+first-party measurement above is the evidence; the issue is corroboration, and
+thin corroboration at that.
+
+**The connection path is eliminated.** TinyUSB issue #2943 reports ESP32-S3 USB
+failing when a board is plugged directly into a host port and working through a
+hub, which made the physical path worth testing. It was, on 2026-08-28: three
+different ports including both motherboard and case headers, with the committed
+firmware, and the failure persisted identically on all of them. A hub was not
+available, so a hub specifically remains untried — but a defect that reproduces
+across three independent ports is not a property of one port.
+
+**What this rules out.** The BIOS is no longer a promising lever: a BIOS USB
+setting governs whether VBUS survives S3, and VBUS demonstrably already does.
+There is nothing there for it to change.
 
 #### The grace-period measurement spans the suspend
 
@@ -1340,6 +1452,65 @@ endpoint from a silent one. The one question none of the host-side evidence coul
 answer was whether the firmware was alive at all; the OLED and the button
 answered it, exactly as they did in the
 [original investigation](#usb-suspend--the-defect-the-windows-build-found).
+
+### Checked against both platforms' documentation — 2026-08-28
+
+Asked plainly after a day of firmware failures: is the daemon's whole approach to
+sleep, wake, shutdown and boot what the platforms actually document, or a
+workaround that happens to work? Checked rather than assumed, and recorded here
+because the answer redirects effort away from the daemon and because these are
+the claims most likely to be re-litigated by somebody who was not here.
+
+**Linux is the documented pattern, exactly.** systemd's *Inhibitor Locks* states
+that applications "shall take an inhibitor lock via the logind D-Bus API", and
+that a `delay` lock is "intended to be used by applications which need a
+synchronous way to execute actions before system suspend but shall not be
+allowed to block suspend indefinitely". The prescribed sequence — take a delay
+lock, act on `PrepareForSleep(true)` and release, re-take on
+`PrepareForSleep(false)` — is what `LinuxPowerMonitor` implements. The
+documentation's own example use cases include screen lockers acting immediately
+before suspend, which is the same shape as driving a television.
+
+**Windows is the documented pattern too, and the documentation names the
+service path specifically.** *Registering for Power Events* distinguishes the
+two routes: an application receives `WM_POWERBROADCAST`, while "a **service**
+receives a call to the *HandlerEx* callback function it registered by calling
+**RegisterServiceCtrlHandlerEx**". That is what this daemon does, with
+`RegisterPowerSettingNotification` for `GUID_CONSOLE_DISPLAY_STATE`, which is
+listed among the power-setting GUIDs most useful to applications.
+`PBT_APMQUERYSUSPEND` is deprecated by Microsoft and this daemon does not use it.
+
+**The two-second budget is now sourced rather than folklore.** *System Power
+Management Events*: "The system allows for a maximum of two seconds per
+application when handling this message before timing out." The suspend budget is
+1500ms, inside it deliberately. Every send that actually completed came in far
+under: 206ms on the laptop's hibernate, 113ms on the S3 machine's shutdown. **The
+budget has never been the problem**, which earlier passes suspected without being
+able to cite anything.
+
+The same page requires that a handler "perform any necessary operations quickly
+and return out of the message loop". `requestState()` sets the pending state
+under the queue lock and the handler returns `NO_ERROR`; the worker thread does
+the send. That is the reason for the [threading model](#threading-model--worker-thread),
+and it is a requirement rather than a preference.
+
+**One documented gap this check turned up, and it is accepted rather than
+fixable.** From the same page: "When the system carries out a *critical
+suspension*, the system is immediately put to sleep due to a critical condition
+such as a critical battery alarm. In contrast to a normal sleep transition, the
+system does not notify applications and drivers before carrying out a critical
+suspension." So there is a sanctioned path on which **no notification arrives at
+all** and the TV is left on. Nothing in this design can prevent it; the next
+display-on corrects the state. Recorded so it is not later found and filed as a
+defect. `PBT_APMRESUMECRITICAL` is already named in the resume handler for the
+other half of the same case.
+
+**What this leaves.** Nothing in either daemon needs redesigning on these
+grounds. The one part of this project that contradicts a platform requirement is
+the firmware's `tud_disconnect()` / `tud_connect()` recovery, against
+`Device.Connectivity.UsbDevices.MustResumeWithoutForcedReset` — see [what Windows
+actually does](#what-windows-actually-does-and-where-that-puts-the-fault). The
+daemon methodology is correct; the device's USB behaviour is not.
 
 ### Where the implementation departs from the plan
 
@@ -1973,7 +2144,12 @@ function every power event uses. It is an exception in that function now.
   right direction (an unreadable capability set falls back to driving the OFF
   from the display, which errs towards the device doing its job) but it is no
   longer free.
-- **The ~2s grace period** is guidance, not a contract. **First measurement
+- ~~**The ~2s grace period** is guidance, not a contract.~~ **Sourced
+  2026-08-28**: Microsoft states "the system allows for a maximum of two seconds
+  per application when handling this message before timing out". It is a
+  documented timeout, and the 1500ms budget sits inside it deliberately. See
+  [checked against both platforms' documentation](#checked-against-both-platforms-documentation--2026-08-28).
+  The original note read: **First measurement
   2026-08-27: 206ms of the 1500ms budget**, on a hibernate where the display-off
   and the suspend arrived 41ms apart. It is only measurable when they collide
   closely enough that the suspend send is not already suppressed. The Modern
@@ -2788,6 +2964,7 @@ Two ways out, neither done:
 | POST body size is unbounded | `server.arg("plain")` buffers the whole request before any handler runs, so the 32-profile cap bounds the *list*, not the allocation preceding it. Bounded in practice by the AP password and by ArduinoJson returning `NoMemory` cleanly. A real fix needs a custom body handler. |
 | No firmware watchdog | Nothing feeds a task WDT on a device meant to sit powered continuously. A hung loop stays hung until it is unplugged. **The highest-priority item in this table**, and it is here rather than under [Blocking release](#blocking-release) only because it needs hardware time rather than a decision. The device's entire value is being more reliable than the network-based alternatives it exists to replace; a silent hang that persists until somebody notices the TV has stopped following the PC is precisely the failure those alternatives are criticised for. It is also the one defect in the project with no diagnostic at all — the daemon sees a write time out and reports honestly, but nothing anywhere says *why*. Sizing the timeout needs care: `loop()` performs blocking IR sends and serves the web UI, so the WDT has to tolerate the longest legitimate one. |
 | Cancelled shutdown is not handled | `PrepareForShutdown(false)` does nothing, so after a *cancelled* scheduled shutdown the delay inhibitor is not re-taken and the next sleep or shutdown goes undelayed. Bounded to that one event — the wake path re-takes unconditionally, so a sleep/wake cycle restores the lock. Deliberate, and narrower than it sounds: reaching the state at all needs the cancel to land inside the sub-second window between the shutdown beginning and the daemon releasing its lock. Cancelling during the scheduled wait beforehand does nothing, because no signal has fired yet. Judged not worth the code. |
+| Critical suspension sends no `OFF` | Documented Windows behaviour, not a defect and not fixable: on a critical suspension — a critical battery alarm, for instance — "the system does not notify applications and drivers before carrying out" it, so no `PBT_APMSUSPEND` arrives and the TV is left on. The next display-on corrects the state. Recorded 2026-08-28 so it is not later found and filed as a bug; see [checked against both platforms' documentation](#checked-against-both-platforms-documentation--2026-08-28). |
 | No protocol version handshake | Deliberate while pre-release — see [Version lockstep is deliberate](#version-lockstep-is-deliberate). A mismatch is detected and logged distinctly, but not negotiated. Revisit at the first packaged release that reaches someone else. |
 
 ### Windows implementation
@@ -2806,7 +2983,7 @@ All three were found in one session on the S3 machine — see
 
 | Issue | Notes |
 |---|---|
-| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here, and **not yet diagnosed** — four instrumented builds narrowed it without closing it; see [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped). The open question is whether the device power-cycles during S3, because that decides whether any firmware fix is possible at all. One cycle with an NVS boot counter settles it. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
+| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here, and **not yet diagnosed** — four instrumented builds narrowed it without closing it; see [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped). The open question is whether the device power-cycles during S3, because that decides whether any firmware fix is possible at all. Settled 2026-08-28: the device stays powered and running, and **no layer of the USB stack ever learns of the suspend** — not the Arduino events, not TinyUSB's own callbacks, not `tud_suspended()`. Windows is meanwhile doing a correct port suspend/resume, and the device fails the HLK requirement `MustResumeWithoutForcedReset`. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
 | **The suspend grace-period measurement spans the suspend** | It reports wall-clock across a period when the CPU was not running, so the figure it prints is the sleep duration: `18732ms` against a 20s sleep, `4640ms` against a 5s one. A reader who trusts it concludes the 1500ms budget is hopeless, which is not what happened. Same category as the `(sleep)` mislabelling removed on 2026-08-26 — a plausible number where somebody would look for an answer. Either measure across the send only, or do not print a number. |
 | **A failed send is never retried** | A lost ACK leaves the daemon's believed TV state wrong until an unrelated event corrects it. Declining to record an unconfirmed state is correct and should stay; the gap is that nothing re-attempts. On Modern Standby the device arrival supplied that retry by accident. |
 
