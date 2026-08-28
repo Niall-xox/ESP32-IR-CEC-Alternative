@@ -603,9 +603,17 @@ see. By the end of 2026-08-27 every row that machine can answer had been
 answered: all eleven per-machine tests, plus 13, 14, 15 and 16, with 17 closed
 as out of scope.
 
-What is left is the **S3 machine**, and only two rows genuinely need it —
-[test 11 and test 12](#resume-here). Neither is reachable on hardware with no
-S3 and Fast Startup on, which is every machine tested so far.
+**The S3 machine ran on 2026-08-28, and both rows only it can answer passed** —
+[test 11 and test 12](#verification-plan). It also found
+[three defects](#the-s3-machine--2026-08-28), all of them in paths Modern
+Standby cannot reach, and the most serious is that the firmware's USB recovery
+does not run on an S3 resume: the TV stays off after a wake until somebody
+replugs the device by hand.
+
+So the verification plan is no longer what is blocking. **Fixing the firmware
+is**, and until it is fixed the wake `ON` — the single behaviour this device
+exists for — does not work on a desktop that sleeps to S3. Four rows on that
+machine remain unrun (3b, 6, 8 and 10); none of them is why the work stopped.
 
 ### Where it stands
 
@@ -613,17 +621,17 @@ S3 and Fast Startup on, which is every machine tested so far.
 |---|---|
 | Windows build | **Works.** Builds under MSVC via vcpkg, and cross-compiles clean under `-Wall -Wextra` for x86_64-w64-mingw32, linking a complete PE. |
 | Device reachable | **Verified 2026-08-24, re-verified 2026-08-26** against the reflashed firmware. `--console` opens the device, sends `ON`, receives the ACK, and the TV responds. |
-| S3 suspend | **Written; the events seen, the S3 path not.** `PBT_APMSUSPEND` and `PBT_APMRESUMESUSPEND` both fired on 2026-08-26 — on a Fast Startup shutdown, not an S3 suspend — and both behaved correctly, the resume declining to assert `ON` while the display was known off. A real S3 suspend still needs the S3 machine. |
+| S3 suspend | **Verified 2026-08-28 — the routing is right, the send is not.** `PBT_APMSUSPEND` drove the `OFF` on a real S3 suspend, twice, with the display-off correctly declined by policy so nothing preceded it. The IR fired both times. The ACK did not come back, and the wake `ON` then failed outright — see [the S3 machine](#the-s3-machine--2026-08-28). Superseded detail: **the events had been seen before the path was.** `PBT_APMSUSPEND` and `PBT_APMRESUMESUSPEND` both fired on 2026-08-26 — on a Fast Startup shutdown, not an S3 suspend — and both behaved correctly, the resume declining to assert `ON` while the display was known off. A real S3 suspend still needs the S3 machine. |
 | Hibernate (S4) | **Verified 2026-08-26**, both ways: a Fast Startup shutdown (`boot type 0x1`, `away for 23s`) and a real `shutdown /h` hibernate (`boot type 0x2`, `away for 62s`). The second produced the project's first grace-period measurement and disproved the expectation that the device would re-enumerate across it. |
 | Modern Standby | **Verified 2026-08-26** — three real cycles, one of 4h11m, including an unattended maintenance wake that correctly left the TV off. Display state is the only signal that fires on S0ix, and it carried the whole thing. See [what the cycles showed](#what-the-modern-standby-cycles-actually-showed). |
 | Power model reporting | **New 2026-08-26.** The daemon reads `SYSTEM_POWER_CAPABILITIES` at startup and logs which of the three this machine is. |
 | Device arrival/removal | **New 2026-08-26.** `RegisterDeviceNotification` on the HID interface class, filtered to this VID/PID. |
-| Grace-period measurement | **New 2026-08-26, and it has produced its first number the same day: 206ms of 1500ms.** Each suspend send reports how many of its budgeted milliseconds it used. It only reports when a suspend send actually happens, which needs the suspend to arrive before the display-off `OFF` has been confirmed. |
-| USB suspend defect | **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. The arrival came 12.6s after the display did, [once and unexplained](#what-the-modern-standby-cycles-actually-showed); every other reconnection in the log is between 0.4s and 3.5s. |
+| Grace-period measurement | **Broken for suspends, found 2026-08-28.** The timer spans the suspend, so it reports the sleep duration wearing a budget label — `18732ms` against a 20s sleep, `4640ms` against a 5s one. The only trustworthy numbers are sends that completed before the machine went: 206ms on the laptop's hibernate, and 113ms on the S3 machine's shutdown. Original note: **New 2026-08-26, first number 206ms of 1500ms.** Each suspend send reports how many of its budgeted milliseconds it used. It only reports when a suspend send actually happens, which needs the suspend to arrive before the display-off `OFF` has been confirmed. |
+| USB suspend defect | **Not fixed on S3 — reopened 2026-08-28.** The recovery does not run on an S3 resume: no removal, no arrival, and the device returns wedged. The Modern Standby evidence below is still true, but it no longer shows what it was read as showing — the platform cycled the device there, and the arrival re-assert is what sent the `ON`. Previously recorded as: **Fixed in firmware, and the fix exercised 2026-08-26.** The device was gone for 4h11m across a Modern Standby cycle, re-enumerated on resume and answered — the recovery path Linux never triggers, run for real. The arrival came 12.6s after the display did, [once and unexplained](#what-the-modern-standby-cycles-actually-showed); every other reconnection in the log is between 0.4s and 3.5s. |
 | Service | **Installed, started and restarted 2026-08-26** on the Modern Standby laptop, after four defects were fixed. Five consecutive restarts, each re-asserting `ON`. MSVC `/W4` reports nothing, so gcc's `-Wall -Wextra` was not hiding anything. |
 | Display-state design | **Answered 2026-08-26, and the assumption held.** Registration *does* deliver the current value: the first service start logged `display state = on` and drove an `ON` from it within 2ms. The boot `ON` works as designed, and the fallback the [sanity check](#five-decisions-the-sanity-check-reversed) built for the other outcome has not been needed. |
 | Display-off scoping | **Changed 2026-08-26, and the branch verified the same day.** An idle screen blank asserts OFF only on a machine with no usable suspend event; the capability report decides, and the daemon logs which branch it took. The Modern Standby laptop correctly reports `an idle screen blank turns the TV off (no usable suspend event on this machine)`. The blank itself has not been tested. |
-| Per-event budgets | **Changed 2026-08-26, and the reason half verified the same day.** The budget and the reason travel with each command. Every command in the log names its own trigger — `(display off)`, `(display on)`, `(ESP32 reconnected)` — and not one is mislabelled `(sleep)`, which is the defect this replaced. The *budget* half is still unmeasured: no send has yet happened under the suspend deadline, because the display-off always gets there first. |
+| Per-event budgets | **Changed 2026-08-26, and the reason half verified the same day.** The budget and the reason travel with each command. Every command in the log names its own trigger — `(display off)`, `(display on)`, `(ESP32 reconnected)` — and not one is mislabelled `(sleep)`, which is the defect this replaced. The *budget* half was measured on 2026-08-28 and the instrument turned out to be broken — see the grace-period row above. |
 
 `WindowsPowerMonitor.*` was rewritten against the design in this section. It
 compiles clean under `-Wall -Wextra` via an x86_64-w64-mingw32 cross-compile and
@@ -686,45 +694,51 @@ tests pass, plus 13, 14, 15 and 16; test 17 was
 risk in the brief — a full Modern Standby cycle, test 15 — passed three times,
 one of them across 4h11m.
 
-4. **The S3 machine is where the work goes next**, and only two rows genuinely
-   need it. Both are rows no amount of testing here can ever reach:
+~~4. **The S3 machine.**~~ Done 2026-08-28. `powercfg /h off` first, confirmed
+from the daemon's capability report rather than the setting. **Test 11 and test
+12 both pass** — the suspend drove the `OFF` with nothing in front of it, and a
+true cold boot reprinted the whole capability report on the way back. It also
+found [three defects](#the-s3-machine--2026-08-28), which is what the rest of
+this list is now about. Turn hibernate back on with `powercfg /h on` if that
+machine is somebody's daily driver.
 
-   - **Test 11** — `PBT_APMSUSPEND` *driving* the OFF. The event itself has now
-     fired on Modern Standby hardware, via a Fast Startup shutdown, but the
-     display-off always got there first and did the work. A machine where the
-     suspend arrives with no display change in front of it is the only place
-     that half can be observed.
-   - **Test 12** — a cold boot with Fast Startup **disabled**, the only true
-     cold boot there is. Every boot measured on this laptop was `boot type
-     0x1` or `0x2`: a resumed kernel session, never a fresh one.
+5. **Fix the firmware's USB recovery on the S3 path.** The blocker, and the
+   reason this is no longer a testing list. The recovery never runs on an S3
+   resume: no removal, no arrival, and the device comes back with a wedged OUT
+   endpoint, so the wake `ON` fails and the TV stays off until somebody replugs
+   it. Establish first *whether the handler fires at all* — whether
+   `ARDUINO_USB_SUSPEND_EVENT` is delivered on this path, and whether
+   `serviceUsbRecovery()` reaches `tud_disconnect()`. The OLED is the instrument
+   that settles it, as it was for the
+   [original investigation](#usb-suspend--the-defect-the-windows-build-found).
+   Do not tune anything until that question has an answer; the two candidate
+   causes need opposite fixes.
 
-   Both need Fast Startup turned **off** on that machine, which is a setting
-   rather than a property — unlike the sleep model, which is firmware and cannot
-   be changed. Elevated, before installing anything:
+6. **Fix the grace-period measurement, or stop printing a number.** It spans the
+   suspend and reports the sleep duration. Two samples say so unambiguously.
+   Measure across the send alone, and note that on Windows the machine can go
+   down mid-send — a send that never completed has no duration to report, and
+   saying so is better than a number.
 
-   ```powershell
-   powercfg /h off        # disables hibernate, and Fast Startup with it
-   ```
+7. **Decide whether a failed send should be retried.** A lost ACK currently
+   leaves the believed TV state wrong until something unrelated corrects it.
+   Declining to record an unconfirmed state should stay. What is missing is a
+   re-attempt, and the suspend path is the awkward case: there may be no time
+   for one before the machine goes.
 
-   Confirm it took by reading the daemon's own opening lines rather than the
-   setting: `Fast Startup (Hiberboot)=no` in the capability report is the
-   statement that matters, because that is what the daemon acted on.
+8. **Finish the four unrun rows on the S3 box** — 3b, 6, 8 and 10. None is why
+   the work stopped, and 3b is the more interesting of them: it is the only
+   machine where the *ignored*-blank branch can be watched, and the TV should
+   stay on.
 
-   Note that `/h off` removes hibernate too, so tests 13 and 14 cannot be run in
-   that state — but both already passed on the Modern Standby laptop, so the S3
-   machine does not need to re-answer them. Turn it back on afterwards with
-   `powercfg /h on` if that machine is somebody's daily driver.
+9. **Run `verify-windows.ps1` on each machine** and keep the report. That is
+   what makes three sessions on three machines into one record. Not yet run on
+   the S3 box.
 
-   Everything else is the same as it was here: build, `--console`, install
-   elevated, work the table, then `verify-windows.ps1`. The
-   [Windows build section](#windows) has the commands.
-
-5. **Run `verify-windows.ps1` on each machine** and keep the report. That is
-   what makes three sessions on three machines into one record.
-
-5. **The standby cycle** remains the largest single risk, and the one thing the
-   firmware fix still has not been shown to survive. Three outcomes to tell
-   apart, in [the risks below](#risks-to-check-on-the-real-machine).
+10. **The standby cycle** is no longer the largest single risk — item 5 is. It
+    remains the case that the firmware fix has never been shown to run on any
+    platform; what the Modern Standby cycles show is that the *platform* cycled
+    the device and the arrival re-assert did the work.
 
 Not on this list and still open from before any of it: the release guard on
 `v*` tags, and the registered VID/PID.
@@ -1107,6 +1121,148 @@ alive. Firefox declared a `DISPLAY` request and was protected; Hollow Knight
 declared nothing and was equally protected. Anyone tempted to build a
 warning — or a policy — on the presence of that request should know it reports
 one of several mechanisms and not the outcome.
+
+### The S3 machine — 2026-08-28
+
+The third configuration, and the one the [verification plan](#verification-plan)
+had been waiting on. Both rows only this machine can answer —
+[11 and 12](#verification-plan) — passed. Three defects came with them, and all
+three live in code that two days of Modern Standby testing found nothing wrong
+with, because Modern Standby cannot reach them.
+
+Set up as [Resume here](#resume-here) says: `powercfg /h off` first, confirmed
+from the daemon's own report rather than from the setting.
+
+```
+S1=no  S2=no  S3=yes  S4=yes
+hiberfil present=no  Modern Standby (AoAc)=no
+Fast Startup (Hiberboot)=no
+display-off policy: an idle screen blank is ignored — PBT_APMSUSPEND drives the OFF on this machine
+```
+
+`S4=yes` alongside `hiberfil present=no` is correct, and worth reading carefully
+before somebody files it as a bug: `S4` is the firmware's capability, which
+`powercfg /h off` does not change, and `hiberfil present` is whether it is
+enabled. Together they say "S4 capable, currently disabled". Anyone expecting
+`S4=no` after `/h off` is reading the wrong line.
+
+The `display-off policy` line is the [2026-08-26 scoping
+change](#five-decisions-the-sanity-check-reversed) taking its other branch for
+the first time on any machine. It is what makes test 11 answerable here.
+
+#### Test 11 — the suspend drives the OFF
+
+```
+15:20:04.525 display state = off
+  ignored — this machine has S3, so the suspend event drives the OFF
+15:20:04.546 PBT_APMSUSPEND (sleep or hibernate)
+[event] Going to sleep
+```
+
+Nothing was in front of the suspend, because the policy declined the
+display-off — which is precisely the confound that made this row unanswerable on
+the Modern Standby laptop, where the display-off always sent first. Both resume
+guards fired correctly in both cycles: `PBT_APMRESUMEAUTOMATIC ... not acted on`,
+and `PBT_APMRESUMESUSPEND while display is known off — not asserting on`.
+
+Test 12 needs less saying. A full shutdown with Fast Startup off reprinted the
+entire capability report on the way back — a genuinely new process rather than a
+resumed one, where every previous boot in this project was `boot type 0x1` or
+`0x2`. The `OFF` going down was sent **and ACKed in 113ms** against the 20s
+shutdown budget: the machine stays powered through preshutdown, so the ACK has
+room to return. That is the only honest send measurement this session produced.
+
+#### The firmware's USB recovery does not run on an S3 resume
+
+Two sleep cycles, identical both times. The `OFF` transmits IR — the TV visibly
+goes off — and no ACK returns. The wake `ON` then fails outright, and the TV
+stays dark until somebody unplugs the ESP32 and plugs it back in.
+
+What identifies it is what is *absent*. There is no `ESP32 removed` and no
+`ESP32 arrived` after either resume, and a `tud_disconnect()` / `tud_connect()`
+would have produced both. The recovery did not run: the device stayed powered
+across S3, the bus was suspended under it, and it came back with a wedged OUT
+endpoint and no idea anything had happened.
+
+This is the same wedge the [USB suspend
+defect](#usb-suspend--the-defect-the-windows-build-found) describes, reached by a
+route the fix does not cover. Two things the brief had written the other way
+round:
+
+- The per-device registry values are called
+  ["defence in depth rather than the fix"](#what-is-still-worked-around-and-what-is-still-open).
+  Here they are neither: they suppress *idle selective* suspend, and a system
+  suspend powers the bus down regardless of them. They were still necessary —
+  without them the device wedged while merely idle, and `--console` could not
+  pass at all — but they do nothing for this.
+- The recovery is described as costing nothing, on the grounds that *"a clean
+  resume is re-enumerated for nothing"*. It cannot cost nothing on a path where
+  it does not run.
+
+There is a harder consequence for the Modern Standby record. Those cycles passed
+with the device removed and back inside 0.4s, and the arrival re-assert is what
+sent the `ON`. That was read as the firmware fix working. It is equally
+consistent with the platform cycling the device and the fix never having run
+there either — the evidence does not separate them. **Test 15 is not weakened as
+a product result** (the TV came back on, three times, which is what the row
+asks), but the firmware fix should no longer be cited as the thing that made it
+pass.
+
+The failure lands on the configuration this device most plausibly ships into: a
+desktop connected to a television, which sleeps to S3 and wakes with the TV
+still off.
+
+#### The grace-period measurement spans the suspend
+
+It reports wall-clock across a period when the CPU was not running, so it
+measures the sleep and not the send:
+
+| Cycle | Reported | `away for` |
+|---|---|---|
+| 1 | `suspend send took 18732ms of the 1500ms budget` | 20s |
+| 2 | `suspend send took 4640ms of the 1500ms budget` | 5s |
+
+Two samples, each tracking its own sleep duration. This is **not** a 12× budget
+overrun and must not be recorded as one. It is the same category as the
+`(sleep)` mislabelling removed on 2026-08-26 — a plausible number in the one
+place somebody would go looking for an answer — and it is worse than silence,
+because a reader who trusts it concludes the budget is hopeless. The laptop's
+206ms figure stands: that send completed before the machine went.
+
+#### A failed send is never retried
+
+The `OFF` fired IR and lost its ACK, so the daemon declined to record a TV state
+it could not confirm — and then believed `ON` while the TV was off. Declining to
+record is correct and should stay; the gap is that nothing re-attempts
+afterwards, so the wrong belief simply stands. On Modern Standby the device
+arrival supplied that retry by accident. On S3 nothing does.
+
+#### What the bring-up cost, and what it was not
+
+Worth recording because two of the three explanations tried were wrong, and the
+order they were eliminated in is the reusable part.
+
+The machine had no toolchain at all. The ESP32 attached to it was running
+firmware predating the USB suspend fix, which was found by inspection rather
+than symptom and reflashed — `pio run -t upload` only, deliberately not
+`uploadfs`, since the filesystem holds the configured profile and overwriting it
+would have meant re-entering it through the WiFi UI before any testing could
+start.
+
+Reflashing did not fix `--console`, and it was never going to: the failure was
+`EnhancedPowerManagementEnabled = 1` letting Windows idle-suspend the device
+between runs, with `DeviceSelectiveSuspended = 1` readable in the registry
+*while the tests were failing*. Clearing both values and replugging fixed it
+immediately. The reflash was still necessary — test 11 needs the fix present to
+have any chance — but it was not the cause, and a session that had stopped there
+would have recorded a false success.
+
+The diagnostics earned their keep. The report-descriptor dump ruled out the bad
+descriptor in one line, and the per-attempt write errors distinguished a wedged
+endpoint from a silent one. The one question none of the host-side evidence could
+answer was whether the firmware was alive at all; the OLED and the button
+answered it, exactly as they did in the
+[original investigation](#usb-suspend--the-defect-the-windows-build-found).
 
 ### Where the implementation departs from the plan
 
@@ -1726,6 +1882,12 @@ function every power event uses. It is an exception in that function now.
   `display state = on` and drove an `ON` from it within 2ms — and
   `GUID_CONSOLE_DISPLAY_STATE` does reach a session-0 service, which every
   display transition since has confirmed.
+- **A failed send is never retried.** Found 2026-08-28. Declining to record an
+  unconfirmed TV state is deliberate and correct; having nothing re-attempt
+  afterwards means a lost ACK leaves the daemon's belief wrong until some
+  unrelated event corrects it. On Modern Standby the device arrival supplied
+  that retry by accident, which is why two days of testing there did not
+  surface it. See [the S3 machine](#the-s3-machine--2026-08-28).
 - **The capability report is now load-bearing.** `AoAc` and `SystemS3` used to
   be diagnostics; they now decide whether an idle screen blank turns the TV off.
   Read the `display-off policy:` line on each of the three machines and confirm
@@ -1769,6 +1931,12 @@ function every power event uses. It is an exception in that function now.
   observes."* That holds for one suspend a day. It may not hold on a machine
   that dips in and out of DRIPS continuously, where the bus can be suspended and
   resumed many times an hour.
+
+  **Read this against 2026-08-28**, which found the recovery not running at all
+  on an S3 resume. This risk assumes it runs too often; that finding says there
+  is a path where it never runs. Both can be true — they are different platforms
+  — but whichever is measured first should establish *whether the handler fires*
+  before anything is concluded about how often.
 
   If every DRIPS exit triggers a `tud_disconnect()` / `tud_connect()`, the
   device spends a second unavailable each time, and any command landing in that
@@ -1832,6 +2000,14 @@ A clean resume gets re-enumerated for nothing, costing about a second of
 unavailability that nothing observes. A broken one is repaired. Recovering
 blindly is cheaper than detecting, and it does not depend on having correctly
 guessed which resumes are the bad ones.
+
+**It does not run on an S3 resume.** Established 2026-08-28 on the S3 machine,
+twice: no `ESP32 removed` and no `ESP32 arrived` follow the resume, so no
+re-enumeration happened, and the device comes back wedged. The reasoning above
+is sound and the mechanism is right; what is not established is that the suspend
+event reaches it on every path that powers the bus down. See
+[the S3 machine](#the-s3-machine--2026-08-28). Until that is fixed, the
+paragraph above describes Modern Standby and nothing else.
 
 Registered through `ARDUINO_USB_SUSPEND_EVENT` / `ARDUINO_USB_RESUME_EVENT`,
 and acted on in `loop()` rather than in the callback — tearing down USB from
@@ -1971,24 +2147,24 @@ three separate sessions comparable afterwards.
 
 | | Test | S3 box | S4 box | Modern Standby |
 |---|---|---|---|---|
-| 1 | Device reachable — `--console` sends `ON`, gets the ACK | no | no | **yes**, 2026-08-24, again 2026-08-26 |
-| 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | no | no | **yes**, 2026-08-26 |
-| 3 | Display returning turns the TV on | no | no | **yes**, 2026-08-26 — three times, on real resumes |
-| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | no | no | **yes**, 2026-08-27 with a 5-minute timeout set. TV off, which is the right outcome against this machine's policy line. But the blank could not be separated from a standby entry — see [the blank is the standby](#the-screen-blank-is-the-standby-entry) |
-| 4 | Sleep and wake, user-initiated | no | no | **yes**, 2026-08-26 — three cycles, `OFF sent and ACK received (display off)` going down and `ON` on the way back |
-| 5 | Shutdown, then boot | no | no | **yes**, 2026-08-26 — `OFF` ACKed 613ms before the machine went; `ON` on the way back. See [the Fast Startup shutdown](#the-fast-startup-shutdown--the-suspend-path-does-run-here) |
-| 6 | Service restart with the display on: `ON` re-asserted, no visible change | no | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
-| 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | no | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
-| 8 | Graceful behaviour with the ESP32 absent entirely | no | no | **yes**, 2026-08-26 — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up; a send with no device logs `ON FAILED — no ACK, TV state not changed` rather than claiming success |
-| 9 | A hand-run copy refusing to start while the service holds the mutex | no | no | **yes**, 2026-08-26 |
-| 10 | Unconfigured profile answering `ERR` | no | no | **yes**, 2026-08-27 — both directions, and the OLED showed its no-IR-code message. `ESP32 returned ERR for command: OFF` → `OFF FAILED — no ACK, TV state not changed`, then the same for `ON`. The failure is reported at both layers and the TV's believed state is left alone |
+| 1 | Device reachable — `--console` sends `ON`, gets the ACK | **yes**, 2026-08-28 — ACK received and the IR fired; the TV responded | no | **yes**, 2026-08-24, again 2026-08-26 |
+| 2 | Service installs, starts, and logs its power model **and its display-off policy** correctly | **yes**, 2026-08-28 — reports classic S3, Fast Startup off, and the ignored-blank policy | no | **yes**, 2026-08-26 |
+| 3 | Display returning turns the TV on | **no**, 2026-08-28 — the wake `ON` failed in both sleep cycles; see [the S3 machine](#the-s3-machine--2026-08-28) | no | **yes**, 2026-08-26 — three times, on real resumes |
+| 3b | Idle screen blank: TV **off** on a machine with no S3, TV **left on** where the log says the blank is ignored. Both outcomes are a pass — the log line says which to expect | not run, 2026-08-28 | no | **yes**, 2026-08-27 with a 5-minute timeout set. TV off, which is the right outcome against this machine's policy line. But the blank could not be separated from a standby entry — see [the blank is the standby](#the-screen-blank-is-the-standby-entry) |
+| 4 | Sleep and wake, user-initiated | **no**, 2026-08-28 — the `OFF` half works, the wake half failed in both cycles; see [the S3 machine](#the-s3-machine--2026-08-28) | no | **yes**, 2026-08-26 — three cycles, `OFF sent and ACK received (display off)` going down and `ON` on the way back |
+| 5 | Shutdown, then boot | **yes**, 2026-08-28 — `OFF` sent and ACKed in 113ms, `ON` on the way back | no | **yes**, 2026-08-26 — `OFF` ACKed 613ms before the machine went; `ON` on the way back. See [the Fast Startup shutdown](#the-fast-startup-shutdown--the-suspend-path-does-run-here) |
+| 6 | Service restart with the display on: `ON` re-asserted, no visible change | not run, 2026-08-28 | no | **yes**, 2026-08-26 — five consecutive restarts after the [race fix](#the-first-install--four-defects); the "no visible change" half still needs an eye on the TV |
+| 7 | ESP32 unplugged and replugged while running — removal logged, arrival re-asserts | **yes**, 2026-08-28 — twice by hand, both times recovering a wedged device | no | **yes**, 2026-08-26 — twice by hand, and four more times by the machine itself across standby |
+| 8 | Graceful behaviour with the ESP32 absent entirely | not run, 2026-08-28 | no | **yes**, 2026-08-26 — a start with no device logs `ESP32 not found at startup — will retry when needed` and stays up; a send with no device logs `ON FAILED — no ACK, TV state not changed` rather than claiming success |
+| 9 | A hand-run copy refusing to start while the service holds the mutex | **yes**, 2026-08-28 | no | **yes**, 2026-08-26 |
+| 10 | Unconfigured profile answering `ERR` | not run, 2026-08-28 | no | **yes**, 2026-08-27 — both directions, and the OLED showed its no-IR-code message. `ESP32 returned ERR for command: OFF` → `OFF FAILED — no ACK, TV state not changed`, then the same for `ON`. The failure is reported at both layers and the TV's believed state is left alone |
 
 **Configuration-specific — only the machine that has it can answer:**
 
 | | Test | Where |
 |---|---|---|
-| 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only — half of it landed elsewhere on 2026-08-26: the event *fires* on the Modern Standby laptop's Fast Startup shutdown, but it did not drive the OFF, because the display-off had already sent it. "Drives the OFF" still needs a machine where the suspend arrives without a display change in front of it |
-| 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off |
+| 11 | `PBT_APMSUSPEND` fires and drives the OFF | S3 machine only — **passed 2026-08-28**, twice. The display-off was declined by policy, so the suspend arrived with nothing in front of it and drove the `OFF` itself. The routing is what this row tests and it is correct; the send that followed lost its ACK, which is a separate defect — see [the S3 machine](#the-s3-machine--2026-08-28) |
+| 12 | Cold boot with Fast Startup **disabled** — the only true cold boot | S3 machine, Fast Startup off — **passed 2026-08-28**. The whole capability report is reprinted on the way back, so this is a genuinely new process rather than a resumed one; every previous boot in this project was `boot type 0x1` or `0x2` |
 | 13 | Boot with Fast Startup **enabled** | any machine with hibernate — **passed 2026-08-26** on the Modern Standby laptop, `boot type 0x1`. The strongest form of the pass: no service start appears in the log at all, because Fast Startup resumed the same process, and the `ON` happened anyway |
 | 14 | Hibernate and resume; device re-enumerates and the arrival re-assert lands | S4 machine — **passed 2026-08-26** on the Modern Standby laptop (`boot type 0x2`), but *not as described*: the device never re-enumerated and the arrival re-assert never ran. See [the hibernate](#the-hibernate--and-the-two-predictions-it-falsified) |
 | 15 | A full Modern Standby cycle with the firmware USB fix in place | Modern Standby only — **passed 2026-08-26**, three cycles including one of 4h11m. See [what the standby cycles showed](#what-the-modern-standby-cycles-actually-showed) |
@@ -2539,24 +2715,32 @@ Two ways out, neither done:
 
 ### Windows implementation
 
-Still nothing to list here, and the reason has changed twice. The first install
-on 2026-08-26 produced four *observed* failures rather than guesses, and all
-four were fixed the same day — recorded as
-[what the first install found](#the-first-install--four-defects) rather than as
-a backlog. Two days of testing after that produced **no further defects at
-all**: every remaining row on the Modern Standby machine passed on the first
-attempt, and what the testing changed was the brief rather than the code.
+This table was empty until 2026-08-28, and the reason it is not any more is
+worth stating plainly: the entries below were unreachable on the only hardware
+the project had. The first install on 2026-08-26 produced four *observed*
+failures, all fixed the same day and recorded as
+[what the first install found](#the-first-install--four-defects). Two days of
+testing after that produced no further defects at all. That was read at the time
+as the code being sound; it is better read as Modern Standby not being able to
+exercise these paths.
 
-What is left unverified is one machine class rather than a list of behaviours.
-An S3 suspend driving the OFF, and a true cold boot, have never run — see
-[Resume here](#resume-here). Both live in
-[Windows — in progress](#windows--in-progress) with the
-[verification plan](#verification-plan), which is now complete but for those two
-rows.
+All three were found in one session on the S3 machine — see
+[the S3 machine](#the-s3-machine--2026-08-28) for the evidence.
 
-Listing guesses here as though they were defects would put the two kinds of
-claim in the same table, which is the habit the
-[Invariants](#invariants) section exists to break.
+| Issue | Notes |
+|---|---|
+| **The firmware's USB recovery does not run on an S3 resume** | The highest-priority item here. Two cycles, both identical: no `ESP32 removed` and no `ESP32 arrived` after the resume, so no `tud_disconnect()` / `tud_connect()` ran, and the device returns with a wedged OUT endpoint. The wake `ON` fails and the TV stays dark until somebody replugs it by hand. The per-device registry values do not help — they suppress *idle selective* suspend, and a system suspend powers the bus down regardless. It lands on the configuration this device most plausibly ships into: a desktop connected to a television. |
+| **The suspend grace-period measurement spans the suspend** | It reports wall-clock across a period when the CPU was not running, so the figure it prints is the sleep duration: `18732ms` against a 20s sleep, `4640ms` against a 5s one. A reader who trusts it concludes the 1500ms budget is hopeless, which is not what happened. Same category as the `(sleep)` mislabelling removed on 2026-08-26 — a plausible number where somebody would look for an answer. Either measure across the send only, or do not print a number. |
+| **A failed send is never retried** | A lost ACK leaves the daemon's believed TV state wrong until an unrelated event corrects it. Declining to record an unconfirmed state is correct and should stay; the gap is that nothing re-attempts. On Modern Standby the device arrival supplied that retry by accident. |
+
+Two of the three are consequences of the first, in the sense that a working
+recovery would have hidden both again. They are listed separately because fixing
+the recovery does not fix either of them, and the next platform that reaches
+them will not necessarily be S3.
+
+Guesses still do not belong in this table. Every row above is an observed
+failure with a log excerpt behind it, which is the distinction the
+[Invariants](#invariants) section exists to keep.
 
 ### Process
 
