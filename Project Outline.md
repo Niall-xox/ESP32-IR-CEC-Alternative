@@ -702,23 +702,40 @@ found [three defects](#the-s3-machine--2026-08-28), which is what the rest of
 this list is now about. Turn hibernate back on with `powercfg /h on` if that
 machine is somebody's daily driver.
 
-5. **Settle whether the ESP32 power-cycles during an S3 suspend.** One cycle,
-   one number, and it decides whether the blocker is fixable in firmware at all.
-   Flash a build that increments a boot counter in NVS at startup and shows it
-   on the OLED; read it before the sleep and after the wake. Unchanged means the
-   device stayed up and a firmware fix is possible; incremented means it lost
-   power, the firmware is not running when it matters, and the fix has to be
-   host-side or hardware. **Do not write another patch before this number
-   exists** — four builds were spent on 2026-08-28 without it, and two of them
-   were testing hypotheses the number would have eliminated. See
-   [four builds chasing it](#four-builds-chasing-it-and-where-it-stopped).
+~~5. **Settle whether the ESP32 power-cycles during an S3 suspend.**~~ Settled
+   2026-08-28 with an NVS boot counter: it does not. The counter was unchanged
+   across a cycle in which uptime ran continuously from 3s to 208s, and the
+   board's power LED stayed lit throughout. The device is alive the whole time
+   and simply never learns the bus was suspended.
 
-~~6. **Try a different physical connection.**~~ Done 2026-08-28: three ports,
-   motherboard and case headers, committed firmware, identical failure on all
-   three. The connection path is not the variable. A hub specifically was not
-   available and remains the only untried form of this.
+**5. Separate "Windows does this" from "this machine does this." Start here.**
+   Everything else on this list depends on the answer, and the two outcomes call
+   for completely different work. The Windows failure has only ever been seen on
+   one machine, whose single Intel xHCI `8086:A2AF` controller serves every port
+   on it; the machine where everything works differs in *both* operating system
+   and hardware, so nothing so far separates the two.
 
-7. **Accept that no USB-state trigger can work, and design around it.** All
+   - **Free first move:** `lspci -nn | grep -i usb` on the Linux machine. A
+     similar-era Intel xHCI there would weaken the controller hypothesis
+     sharply, because near-identical hardware would then behave differently
+     under two operating systems.
+   - **The decisive test:** boot a Linux live USB **on the Windows machine**,
+     attach the device, suspend, resume, and write to the hidraw node. Same
+     controller, different OS, one variable. No install and no daemon needed.
+
+   If the endpoint survives there, the controller is cleared and the fault is
+   in how this device handles Windows' documented `PORT_SUSPEND` sequence — a
+   real product defect, and item 7 becomes necessary work. If it wedges there
+   too, the controller is the variable, this machine is simply a poor host, and
+   the honest output is a compatibility note rather than a protocol change.
+
+6. **Then decide what item 7 is worth.** Do not design the keepalive before
+   item 5 has an answer. The difference between the two outcomes is the
+   difference between a protocol change carrying Linux and Modern Standby
+   constraints, and a paragraph in a README.
+
+7. **If item 5 says Windows: accept that no USB-state trigger can work, and
+   design around it.** All
    three were measured silent on 2026-08-28 — the Arduino events, TinyUSB's own
    `tud_suspend_cb()` / `tud_resume_cb()`, and `tud_suspended()` itself. The
    remaining option is a liveness timeout: the daemon sends a periodic
@@ -756,6 +773,27 @@ machine is somebody's daily driver.
     remains the case that the firmware fix has never been shown to run on any
     platform; what the Modern Standby cycles show is that the *platform* cycled
     the device and the arrival re-assert did the work.
+
+#### How the S3 machine was left, 2026-08-28
+
+Written down because the next session on it will otherwise rediscover all of
+this, and because two items differ from a clean machine in ways that would be
+read as defects.
+
+| | |
+|---|---|
+| Branch | `windows-first-install`, clean tree |
+| Firmware on the device | **The committed firmware**, full erase and reflash, hash-verified. None of the day's four diagnostic builds survive on it, and none was committed. |
+| Profile storage | **Wiped** by the erase, so the device runs the built-in fallback profile. It still transmits a code this TV answers, so `ON`/`OFF` work — but a profile configured through the WiFi UI is gone. |
+| Service | `esp32-ir-remote` installed, `Automatic`, running, from `daemon\build\Release\esp32-ir-daemon.exe` with `hidapi.dll` beside it |
+| Daemon binary | Built from the committed source and never modified during the session |
+| **Hibernate** | **Disabled** — `powercfg /h off`, needed for test 12. `powercfg /h on` restores it, elevated. Leave it off only if more S3 testing is planned; it is a machine-level change made for one test and should not become permanent by accident. |
+| Selective suspend | `SelectiveSuspendEnabled` and `EnhancedPowerManagementEnabled` both `0` on the device instance, applied by the installer. Without these, writes fail while the device is merely idle and `--console` cannot pass at all. |
+| Toolchain | MSVC 14.44 + SDK 10.0.26100, CMake 4.4.3, vcpkg with `hidapi:x64-windows`, Python 3.12.10, PlatformIO 6.1.19 — all installed and working |
+| Flashing | The device has no serial port while the app runs, so a human must hold BOOT while plugging in to flash, and replug without BOOT afterwards to leave download mode |
+
+Rows 3b, 6, 8 and 10 remain unrun on this machine, and `verify-windows.ps1` has
+never been run on it. None of them is why the work stopped.
 
 Not on this list and still open from before any of it: the release guard on
 `v*` tags, and the registered VID/PID.
@@ -1389,13 +1427,37 @@ changelogs turned up no documented ESP32-S3 suspend-detection fix. The
 first-party measurement above is the evidence; the issue is corroboration, and
 thin corroboration at that.
 
-**The connection path is eliminated.** TinyUSB issue #2943 reports ESP32-S3 USB
-failing when a board is plugged directly into a host port and working through a
-hub, which made the physical path worth testing. It was, on 2026-08-28: three
-different ports including both motherboard and case headers, with the committed
-firmware, and the failure persisted identically on all of them. A hub was not
-available, so a hub specifically remains untried — but a defect that reproduces
-across three independent ports is not a property of one port.
+**The port is eliminated. The controller is not.** TinyUSB issue #2943 reports
+ESP32-S3 USB failing when a board is plugged directly into a host port and
+working through a hub, which made the physical path worth testing. It was, on
+2026-08-28: three different ports including both motherboard and case headers,
+with the committed firmware, identical failure on all of them.
+
+That is a weaker result than it first reads, and the correction is recorded
+because the stronger version was written down first. **This machine has exactly
+one USB host controller** — an Intel xHCI `8086:A2AF` (200-series PCH) on a
+Gigabyte B250M-D2V — and every port on it, headers included, hangs off that
+controller's single root hub. Three ports is one controller three times. A bad
+port is ruled out; a controller-level quirk is not, and cannot be on this
+machine without a PCIe USB card.
+
+**The one machine that works is not a control.** The Linux daemon drives this
+device through sleep, wake, power on and power off correctly — but on
+*different hardware*, so operating system and USB controller vary together and
+neither can be blamed. What the Linux machine does establish, and it is not
+nothing, is that **the device is not fundamentally incapable**: some host/device
+pairing gets a real S3 suspend right, with the endpoint intact and a
+pre-suspend file descriptor still usable afterwards. Nothing in the silicon,
+this firmware or the protocol rules out correct behaviour.
+
+**The test that separates them** is a Linux live USB booted on *this* machine:
+same controller, different OS, one suspend cycle, then a write to the hidraw
+node. If the endpoint survives, the controller is cleared and the fault is in
+how this device handles Windows' documented `PORT_SUSPEND` sequence. If it
+wedges, the controller is the variable and this machine is simply a poor host —
+a much narrower conclusion than a product defect. Cheaper still, and worth doing
+first: read the Linux machine's USB controller with `lspci -nn | grep -i usb`.
+If it is a similar Intel xHCI, the controller hypothesis weakens sharply.
 
 **What this rules out.** The BIOS is no longer a promising lever: a BIOS USB
 setting governs whether VBUS survives S3, and VBUS demonstrably already does.
