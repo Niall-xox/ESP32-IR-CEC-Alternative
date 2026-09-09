@@ -469,10 +469,25 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 1. **Windows, S3 machine**: an idle screen blank should now turn the TV off. It
    previously did not.
-2. **Windows and Linux, stick unplugged**: sleep and shutdown should be
-   instant. Previously delayed by 4 s (Linux) or up to 20 s (Windows shutdown).
-3. **Both platforms, normal sleep/wake**: confirm the single 2 s timeout is
+2. **Both platforms, normal sleep/wake**: confirm the single 2 s timeout is
    still comfortably enough.
+3. **Windows, stick unplugged**: shutdown should be instant, where it was
+   previously delayed by up to 20 s.
+
+**Confirmed 2026-09-09 — Linux, stick unplugged.** Sleep is visibly faster with
+no stick connected, which is the transport's fail-fast open doing its job. The
+old behaviour is preserved in the journal from that morning's boot, and is worth
+keeping as the before-picture:
+
+```
+15:17:10  [transport] ESP32 not found at startup — will retry when needed
+15:17:14  [transport] ESP32 not found — skipping IR command: ON
+15:17:14  [cmd] ON FAILED — no ACK, TV state not changed (startup)
+```
+
+Four seconds between finding no device and giving up — the old send budget
+polling for something that was never going to appear. That delay landed on every
+sleep and every shutdown.
 
 ### Not verified
 
