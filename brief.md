@@ -348,6 +348,17 @@ on" keeps it lit. It also shows: `TV On` / `TV Off` confirmations when a command
 arrives, the two hold progress bars, `Not Configured` when a profile has no
 code, and — in WiFi mode — the AP's IP address.
 
+**The progress bars are one block per second**, and the block count is derived
+from the thresholds in `HoldTimings.h` rather than written down separately — so
+the hold bar has 4 blocks and the reset bar 9, and both follow automatically if
+a timing changes. That makes them countable rather than merely watchable: four
+blocks means four seconds.
+
+Each bar stops one block short of full, because the moment it would complete is
+the moment the screen changes — to *Release To Enter Wireless Config!* at 4 s,
+and to the status screen when the reset fires at 16 s. The screen changing is
+the completion signal.
+
 ### WiFi config mode
 
 Hold the button 4–7 seconds and the ESP32 starts its own WiFi access point:

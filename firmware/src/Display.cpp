@@ -63,12 +63,13 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     if (!ok_) return;
     timerActive_ = false;
 
-    constexpr uint32_t BAR_START = HoldTimings::PRESS_MAX_MS;
-    constexpr uint32_t BAR_SPAN  = HoldTimings::CONFIG_MS - BAR_START;
+    // One block per second held, so the bar can be counted rather than just
+    // watched: four blocks means four seconds. The block count comes from the
+    // threshold itself, so changing CONFIG_MS keeps the two in step.
+    constexpr uint8_t BLOCKS = HoldTimings::CONFIG_MS / 1000;
 
-    uint32_t elapsed = heldMs > BAR_START ? heldMs - BAR_START : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 5) / BAR_SPAN);
-    if (filled > 5) filled = 5;
+    uint8_t filled = (uint8_t)(heldMs / 1000);
+    if (filled > BLOCKS) filled = BLOCKS;
 
     if (barKind_ == BarKind::Hold && barFilled_ == filled && barFlag_ == enteringWifi) return;
     barKind_   = BarKind::Hold;
@@ -82,7 +83,7 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     oled_.setCursor(0, 0);
     oled_.print(enteringWifi ? "Enter Wireless Config?" : "Exit Wireless Config?");
 
-    drawProgressBar(filled, 5, 20);
+    drawProgressBar(filled, BLOCKS, 20);
 
     oled_.display();
 }
@@ -91,12 +92,14 @@ void Display::showResetBar(uint32_t heldMs) {
     if (!ok_) return;
     timerActive_ = false;
 
+    // Also one block per second, counting from where this bar takes over.
     constexpr uint32_t BAR_START = HoldTimings::RESET_START_MS;
-    constexpr uint32_t BAR_SPAN  = HoldTimings::RESET_END_MS - BAR_START;
+    constexpr uint8_t  BLOCKS =
+        (HoldTimings::RESET_END_MS - BAR_START) / 1000;
 
     uint32_t elapsed = heldMs > BAR_START ? heldMs - BAR_START : 0;
-    uint8_t  filled  = (uint8_t)((elapsed * 15) / BAR_SPAN);
-    if (filled > 15) filled = 15;
+    uint8_t  filled  = (uint8_t)(elapsed / 1000);
+    if (filled > BLOCKS) filled = BLOCKS;
 
     if (barKind_ == BarKind::Reset && barFilled_ == filled) return;
     barKind_   = BarKind::Reset;
@@ -109,7 +112,7 @@ void Display::showResetBar(uint32_t heldMs) {
     oled_.setCursor(0, 0);
     oled_.print("Hold To Factory Reset");
 
-    drawProgressBar(filled, 15, 20);
+    drawProgressBar(filled, BLOCKS, 20);
 
     oled_.display();
 }
