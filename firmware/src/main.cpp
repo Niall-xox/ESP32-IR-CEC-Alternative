@@ -156,7 +156,10 @@ bool sendIR(const Profile& profile, bool on) {
             irSend.sendSAMSUNG(code, kSamsungBits);
             break;
         case IrProtocol::SONY:
-            irSend.sendSony(code, kSony20Bits);
+            // 12 bits, not 20. SIRC has three lengths, and a TV is category 1,
+            // which is the 12-bit form — at 20 bits the same command becomes a
+            // different waveform and the TV does not answer.
+            irSend.sendSony(code, kSony12Bits);
             break;
         case IrProtocol::NEC:
         default:

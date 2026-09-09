@@ -171,9 +171,42 @@ A **profile** is one TV: a name, an IR protocol (NEC, Samsung or Sony), an ON
 code, an OFF code, and a "visible" flag that controls whether the button cycles
 through it.
 
-Five ship by default. **Only LG has real codes**; the rest are `0x00000000`,
-which means "not configured" — the firmware answers `ERR` and shows *Not
-Configured* rather than transmitting a meaningless pulse. Up to 32 profiles.
+Six ship by default, four of them with working codes. Up to 32 profiles.
+
+| Profile | Protocol | ON | OFF |
+|---|---|---|---|
+| LG | NEC | `0x20DF23DC` | `0x20DFA35C` |
+| Samsung | SAMSUNG | `0xE0E09966` | `0xE0E019E6` |
+| Sony | SONY | `0x00000750` | `0x00000F50` |
+| Toshiba | NEC | `0x02FD7E81` | `0x02FDFE01` |
+| TCL | NEC | — | — |
+| Hisense | NEC | — | — |
+
+**TCL and Hisense are deliberately empty**, and should stay that way unless
+somebody produces tested codes. Neither publishes usable discrete codes: TCL has
+only a power *toggle*, in a protocol this firmware does not speak, and Hisense
+is not in irdb at all. Filling them with a toggle would be actively worse than
+leaving them blank — the same code in both fields flips the TV on every command,
+which is the drift discrete codes exist to prevent. Left at `0x0` the firmware
+answers `ERR` and shows *Not Configured*, which is honest.
+
+That difference is structural, not bad luck. LG, Samsung, Sony and Toshiba
+design their own remotes across a whole product line, so one code set covers the
+brand. TCL and Hisense are assemblers — the same model number ships as a Roku TV
+in one market and a Google TV in another, with different remotes.
+
+**Only LG is proven on hardware.** The other three are derived from corroborated
+sources and cross-checked against the encoder, but nobody has pointed the stick
+at a Samsung, Sony or Toshiba. Two known risks:
+
+- **Samsung deep sleep.** There are reports that Samsung's discrete power-on
+  stops working once the TV has been off for a long time — the set stops
+  listening to IR. If true, that hits this project's main use case directly
+  (PC wakes in the morning, TV does not). Unconfirmed, and worth being the first
+  thing checked if a Samsung ever turns up.
+- **Samsung's discrete pair is not in irdb**, which lists only the toggle. It
+  comes from RemoteCentral instead and derives consistently to the published
+  hex, but it is one source rather than two.
 
 Codes are stored on the ESP32's own flash filesystem (LittleFS) as two JSON
 files: `/profiles.json` and `/settings.json`. Writes go to a `.tmp` file first,
@@ -199,6 +232,63 @@ remote in front of you.
 A useful consequence: repeat commands are always safe. Sending `OFF` to a TV
 that is already off does nothing at all. The daemon never has to track what it
 last sent, and never has to decide whether a command is redundant.
+
+### Where IR codes come from
+
+Kept here because finding these again from scratch is slow, and because getting
+a code wrong is worse than having none.
+
+**[irdb](https://github.com/probonopd/irdb)** is the one to reach for first —
+the largest crowd-sourced database, and it stores codes as *protocol, device,
+subdevice, function* rather than as raw hex, which is exactly what you need.
+Browse `codes/<Brand>/TV/` and read the CSVs:
+
+```
+curl -s https://api.github.com/repos/probonopd/irdb/contents/codes/Sony/TV
+curl -s https://cdn.jsdelivr.net/gh/probonopd/irdb@master/codes/Sony/TV/1,-1.csv | grep -i power
+  POWER ON/OFF,Sony12,1,-1,21
+  POWER ON,Sony12,1,-1,46
+  POWER OFF,Sony12,1,-1,47
+```
+
+Two things that reads out at a glance: whether **discrete** on/off codes exist
+at all (many brands only have a toggle), and **how many code sets** the brand
+has. One code set for a whole brand means one consistent scheme and good
+coverage; five means it varies by model and you should not ship a guess.
+
+**Turning those parameters into the hex the firmware wants.** Do *not* copy hex
+off a forum — convert from the protocol parameters using the same encoder the
+firmware links against, so the bit ordering cannot disagree:
+
+- NEC — `IRsend::encodeNEC(address, command)` in `ir_NEC.cpp`
+- Sony — `IRsend::encodeSony(nbits, command, address, extended)` in `ir_Sony.cpp`
+
+Both live in `firmware/.pio/libdeps/lolin_s3_mini/IRremoteESP8266/src/`. They are
+small and pure, so the quickest check is to copy them into a throwaway C file and
+print the values.
+
+**Sanity-check any result two ways.** Run the brand's *toggle* code through the
+same path and confirm it matches a value you can find independently — Sony's
+toggle should come out `0xA90`, LG's ON should come out `0x20DF23DC`, which is
+the code already proven on real hardware here. If the toggle reproduces, the
+encoding is right and the discrete pair can be trusted.
+
+**Other sources**, in rough order of usefulness:
+
+- [RemoteCentral's discrete code library](https://files.remotecentral.com/library/index.html)
+  — curated per brand, and the best source for discrete codes irdb lacks. This
+  is where the Samsung discrete pair came from; irdb only lists Samsung's toggle.
+- [SB-Projects protocol reference](https://www.sbprojects.net/knowledge/ir/sirc.php)
+  — how the protocols are actually framed. Read this when a code looks right but
+  does not work; the Sony 12/15/20-bit distinction is the classic trap.
+- The Flipper Zero and LIRC remote databases, and manufacturer RS-232/IR PDFs
+  (Hisense publish one) — worth a look, but model-specific far more often.
+
+**Watch out for.** Forum hex with no protocol stated (unusable — you cannot tell
+12-bit Sony from 20-bit). Single-model blog posts presented as brand-wide. And
+NEC codes whose checksum does not validate: in NEC the second command byte is
+the bitwise inverse of the first, so `0x…8B75` is wrong on its face because
+`0x8B` inverts to `0x74`. That one check rejects a surprising amount of bad data.
 
 ### The button
 
@@ -502,7 +592,8 @@ sleep and every shutdown.
 |---|---|
 | **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
 | **No README, no LICENSE.** Both the Arch and RPM packages declare MIT while no licence text exists in the repo. | High |
-| **Four of five default profiles have no codes.** Anyone without an LG TV has to find discrete hex codes themselves, with nothing in the repo telling them where. | High |
+| **TCL and Hisense profiles have no codes**, and no usable discrete codes appear to exist for either. Not fixable from a database — it needs somebody with the TV in front of them. See §4. | Low |
+| **Samsung, Sony and Toshiba codes are unverified on hardware.** Derived from corroborated sources and cross-checked against the encoder, but nobody has pointed the stick at one of those TVs. | Medium |
 | **Linux does not watch display state.** Your screen blanks, the TV stays on. Now that the whole project is framed as mirroring the display, this is a real inconsistency rather than a design choice. | Medium |
 | **Windows service runs as LocalSystem.** Linux runs unprivileged; Windows should move to LocalService to match. | Medium |
 | CI does not build the firmware — only the daemon. | Medium |
@@ -522,8 +613,10 @@ In the order that gets the project finished.
    OS, and *where to find discrete IR codes* (the LIRC and irdb databases are
    the standard answer).
 
-2. **Fill in or remove the empty profiles.** Shipping four profiles that cannot
-   work is worse than shipping one that does.
+2. **Verify the new codes on real TVs** if any are within reach — Samsung, Sony
+   and Toshiba are all derived rather than tested. A Samsung is the one most
+   worth finding, both because it is the most common brand and because of the
+   deep-sleep caveat in §4.
 
 3. **Apply to pid.codes for a product ID**, and generate the five copies from
    one source so the count cannot go 5 → 6. Free, and only the PID half moves —
@@ -593,6 +686,17 @@ Net: 281 lines removed.
 - **The USB identity moved from `1234:5678` to `1209:0001`** (§2) — a made-up
   pair replaced by pid.codes' open-hardware vendor ID and its test PID.
   **Requires a re-flash to take effect**, since the firmware announces it.
+- **Samsung, Sony and Toshiba default profiles filled in** (§4), taking the
+  working set from one to four. Toshiba is a new profile; TCL and Hisense stay
+  deliberately empty.
+- **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
+  and a TV is the 12-bit form, so the Sony profile could never have worked at
+  20 bits regardless of the codes.
+
+  Note that **existing devices keep their old profiles**. `Profiles::begin()`
+  only writes the defaults when `profiles.json` is absent, so a device that has
+  booted before needs a factory reset — hold the button past 23 s — to pick the
+  new set up. Flashing alone is not enough.
 
 ---
 
