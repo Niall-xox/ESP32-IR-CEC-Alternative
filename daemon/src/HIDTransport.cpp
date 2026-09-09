@@ -87,7 +87,8 @@ hid_device* HIDTransport::openMatching() {
 
     std::cerr << "[transport] " << count << " devices match VID="
               << std::hex << vid_ << " PID=" << pid_ << std::dec
-              << " — the placeholder IDs are not unique. Candidates:\n";
+              << " — this is a shared test PID, not a unique identity."
+                 " Candidates:\n";
     for (const hid_device_info* d = list; d; d = d->next) {
         std::cerr << "[transport]   product=\"" << narrow(d->product_string)
                   << "\" manufacturer=\"" << narrow(d->manufacturer_string)

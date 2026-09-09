@@ -68,6 +68,44 @@ ESP8266. An earlier serial version sits unbuilt at
 CAD for the enclosure is in `3D modeling/`. The `.FCStd` is the editable master;
 `.stl` exports are deliberately not tracked in git.
 
+### The USB identity, and why it is `1209:0001`
+
+Every USB device announces a **vendor ID** and a **product ID**. Vendor IDs are
+issued by the USB-IF and cost real money, which is not worth spending on a
+project that may never leave one desk.
+
+`0x1209` is **pid.codes**, a vendor ID held in trust for open-source hardware
+and shared out free. `0x0001` under it is their designated **test PID**, meant
+for exactly this situation: a device under development that has not been
+allocated a product ID of its own yet.
+
+It replaced `1234:5678`, which was simply made up, and is better in three ways:
+
+- `1209` is a real allocation, so the device is not squatting on some other
+  company's identity.
+- It is self-documenting — anyone who recognises it knows it is a placeholder.
+- The upgrade path is a **PID-only** change. Applying to pid.codes is a free
+  pull request, and the vendor half never moves.
+
+**The caveat, stated plainly.** pid.codes ask that products are not
+*distributed* on the test PID, precisely because it is shared: several devices
+in development can carry it, and the daemon would open whichever it found
+first. That is survivable rather than fatal here — the daemon already prefers a
+device whose USB product string is `ESP32 IR Remote` — but a real PID is still
+needed before this is handed to anybody else. It stays on the list in §8.
+
+The value lives in **five** hand-kept places, which must change together:
+
+| File | Spelling |
+|---|---|
+| `firmware/src/main.cpp` | `0x1209` / `0x0001` |
+| `daemon/src/main.cpp` | `0x1209` / `0x0001` |
+| `daemon/99-esp32-ir-remote.rules` | `"1209"` / `"0001"` (lowercase, no `0x`) |
+| `daemon/packaging/windows/install-service.ps1` | `"1209"` / `"0001"` |
+| `daemon/packaging/windows/verify-windows.ps1` | `"1209"` / `"0001"` |
+
+Five copies is itself the argument for generating them from one source — §9.
+
 ---
 
 ## 3. The conversation over USB
@@ -181,6 +219,32 @@ every press cycles. That is deliberate — it stops a blind press in the dark
 silently changing which TV you are controlling.
 
 All four durations live in `HoldTimings.h` and are used from there.
+
+### The watchdog
+
+The ESP32 has a hardware timer that reboots the chip if the firmware stops
+feeding it. `loop()` feeds it on every pass, so if `loop()` ever stops running —
+a hang, a deadlock, a wait that never returns — the device resets itself after
+**20 seconds** and comes back working.
+
+This matters more than it sounds. A hung stick and an unplugged stick look
+identical from the PC: the daemon just sees a command that got no reply. So
+without the watchdog a hang would sit there until somebody noticed the TV had
+stopped following the PC — which is exactly the unreliability this device exists
+to beat. A reset costs nothing: profiles live in flash, and the daemon reopens
+the device on its next command.
+
+The 20 seconds is set by the **web server**, not by anything in our own code.
+Serving the config page can legitimately block for around 12 s inside one pass
+of `loop()` if a browser stalls mid-request (the server waits 5 s for the
+request, 5 s for data to be acknowledged and 2 s for the close). Everything else
+— button, display, IR, USB — is under 200 ms. The generous margin is deliberate:
+a false reset while somebody is saving IR codes would be worse than a slow one.
+
+It is armed at the very end of `setup()`, so start-up is never watched. A hang
+before that point is a bricked-at-boot device you find the moment you flash it,
+and leaving setup out keeps first-boot flash formatting from having to fit
+inside the timeout.
 
 ### The OLED
 
@@ -421,8 +485,7 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 | Gap | Severity |
 |---|---|
-| **No watchdog in the firmware.** Nothing detects a hung `loop()` on a device meant to sit powered for months. It stays hung until unplugged, with no diagnostic anywhere. | **Highest** |
-| **Placeholder USB IDs `1234:5678`.** Common hobbyist defaults, so another device could collide — and they are hand-copied into **five** files. | High |
+| **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
 | **No README, no LICENSE.** Both the Arch and RPM packages declare MIT while no licence text exists in the repo. | High |
 | **Four of five default profiles have no codes.** Anyone without an LG TV has to find discrete hex codes themselves, with nothing in the repo telling them where. | High |
 | **Linux does not watch display state.** Your screen blanks, the TV stays on. Now that the whole project is framed as mirroring the display, this is a real inconsistency rather than a design choice. | Medium |
@@ -438,36 +501,30 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 In the order that gets the project finished.
 
-1. **Add the firmware watchdog.** ~5 lines: enable the task watchdog in
-   `setup()` with a timeout that comfortably exceeds the longest legitimate
-   blocking operation (an IR send is ~70 ms), and feed it in `loop()`. This is
-   the one remaining defect that can make the device silently stop working,
-   which is exactly the failure mode the project exists to beat.
-
-2. **Get real USB IDs, and generate them from one file.** `pid.codes` allocates
-   free PIDs under VID `0x1209` for open hardware. Then have the build generate
-   the firmware header, the udev rule and the two PowerShell defaults from a
-   single source, so the count cannot go 5 → 6.
-
-3. **Write the README and add a LICENSE.** For the stated audience — hobbyists
+1. **Write the README and add a LICENSE.** For the stated audience — hobbyists
    who want this to work — this is the actual blocker, more than any code issue.
    The README needs: what it is, what hardware, how to flash, how to install per
    OS, and *where to find discrete IR codes* (the LIRC and irdb databases are
    the standard answer).
 
-4. **Fill in or remove the empty profiles.** Shipping four profiles that cannot
+2. **Fill in or remove the empty profiles.** Shipping four profiles that cannot
    work is worse than shipping one that does.
 
-5. **Re-test Windows** against the three cases in §8, then move the service to
+3. **Apply to pid.codes for a product ID**, and generate the five copies from
+   one source so the count cannot go 5 → 6. Free, and only the PID half moves —
+   see §2. Needed before this is handed to anybody else; nothing before that
+   depends on it.
+
+4. **Re-test Windows** against the three cases in §8, then move the service to
    LocalService. The installer already grants LOCAL SERVICE rights on the log
    directory, so the only open question is whether that account can open the HID
    device — and the vendor usage page (`0xFF00`) is not one Windows restricts,
    so it very likely can. Test with
    `sc.exe config esp32-ir-remote obj= "NT AUTHORITY\LocalService"`.
 
-6. **Add display-state watching on Linux**, closing the inconsistency in §8.
+5. **Add display-state watching on Linux**, closing the inconsistency in §8.
 
-7. Add the firmware to CI.
+6. Add the firmware to CI.
 
 ### Worth considering, not required
 
@@ -513,6 +570,14 @@ Reviewed 2026-09-09. Kept as-is, with the reasoning, so they are not re-litigate
   every machine.
 
 Net: 281 lines removed.
+
+### Added 2026-09-09
+
+- **The firmware watchdog** (§4). Clears what was the highest-severity gap.
+  Flashed and verified enumerating.
+- **The USB identity moved from `1234:5678` to `1209:0001`** (§2) — a made-up
+  pair replaced by pid.codes' open-hardware vendor ID and its test PID.
+  **Requires a re-flash to take effect**, since the firmware announces it.
 
 ---
 

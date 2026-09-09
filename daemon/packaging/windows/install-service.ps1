@@ -39,14 +39,17 @@ param(
 
     # Must match DEVICE_VID / DEVICE_PID in firmware/src/main.cpp and
     # daemon/src/main.cpp. Lowercase or uppercase hex, no 0x. This is one of
-    # five hand-kept copies — see the brief's USB device identity table, and
-    # the argument there for generating all five from one source instead.
+    # five hand-kept copies — see the brief, and the argument there for
+    # generating all five from one source instead.
+    #
+    # 1209:0001 is pid.codes' open-hardware VID with its test PID: a
+    # placeholder until a real one is allocated.
     #
     # Not named -Pid: $PID is a PowerShell automatic variable holding the
     # process ID, and binding a parameter to it fails in ways that are not
     # obvious from the error.
-    [string]$VendorId  = "1234",
-    [string]$ProductId = "5678",
+    [string]$VendorId  = "1209",
+    [string]$ProductId = "0001",
 
     [switch]$Uninstall,
 

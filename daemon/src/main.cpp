@@ -16,8 +16,8 @@
 #include <memory>
 #include <stdexcept>
 
-static constexpr uint16_t DEVICE_VID = 0x1234;
-static constexpr uint16_t DEVICE_PID = 0x5678;
+static constexpr uint16_t DEVICE_VID = 0x1209;
+static constexpr uint16_t DEVICE_PID = 0x0001;
 
 #ifdef __linux__
 

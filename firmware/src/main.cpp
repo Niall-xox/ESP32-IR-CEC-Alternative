@@ -26,8 +26,8 @@
 #define OLED_HEIGHT  32
 #define OLED_ADDR   0x3C
 
-#define DEVICE_VID  0x1234
-#define DEVICE_PID  0x5678
+#define DEVICE_VID  0x1209
+#define DEVICE_PID  0x0001
 #define REPORT_SIZE    64
 
 #define WIFI_SSID  "ESP32-IR-Remote"

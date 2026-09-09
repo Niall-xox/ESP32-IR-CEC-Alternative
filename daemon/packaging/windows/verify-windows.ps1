@@ -22,8 +22,8 @@
 [CmdletBinding()]
 param(
     [string]$ServiceName = "esp32-ir-remote",
-    [string]$VendorId    = "1234",
-    [string]$ProductId   = "5678",
+    [string]$VendorId    = "1209",
+    [string]$ProductId   = "0001",
 
     # Where to write a copy. Defaults to the log directory, so the report and
     # the log it refers to stay together.
