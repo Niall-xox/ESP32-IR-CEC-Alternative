@@ -107,12 +107,30 @@ It replaced `1234:5678`, which was simply made up, and is better in three ways:
 - The upgrade path is a **PID-only** change. Applying to pid.codes is a free
   pull request, and the vendor half never moves.
 
-**The caveat, stated plainly.** pid.codes ask that products are not
-*distributed* on the test PID, precisely because it is shared: several devices
-in development can carry it, and the daemon would open whichever it found
-first. That is survivable rather than fatal here — the daemon already prefers a
-device whose USB product string is `ESP32 IR Remote` — but a real PID is still
-needed before this is handed to anybody else. It stays on the list in §8.
+**The caveat, in their words.** pid.codes state that `1209:0001` "is reserved
+for use in private testing. Anyone may assign it to their device while they're
+testing in-house, but it MUST NOT be used on any device that will be
+redistributed, sold, or manufactured."
+
+That is a prohibition, not a preference — but it binds at the moment of
+*distribution*, and nothing has been distributed. Private in-house testing is
+exactly what this PID is for, so using it today is correct rather than merely
+tolerated. It becomes a violation the moment a release is tagged, which is one
+reason tagging waits (§9).
+
+**Getting a real one is not blocked on releasing.** pid.codes ask only for a
+publicly available source repository with an open-source licence — not a
+shipped product, not a release. So the application can go in as soon as there is
+a LICENSE, and can run in parallel with everything else. Note that PIDs
+`0x0000`–`0x1FFF` are reserved and cannot be requested, so the allocated number
+will be `0x2000` or above.
+
+**Do not substitute a made-up number in the meantime.** A random PID under
+`0x1209` squats on a registry that may legitimately assign it to somebody else,
+which recreates the exact collision the registry exists to prevent — and does so
+in the namespace you are about to ask a favour from. A random *vendor* ID is
+worse still: that is what `1234:5678` was. The test PID is the honest choice
+until the real one arrives.
 
 The value lives in **five** hand-kept places, which must change together:
 
@@ -676,10 +694,12 @@ There is currently **no guard** stopping that — see §8.
    worth finding, both because it is the most common brand and because of the
    deep-sleep caveat in §4.
 
-3. **Apply to pid.codes for a product ID**, and generate the five copies from
-   one source so the count cannot go 5 → 6. Free, and only the PID half moves —
-   see §2. Needed before this is handed to anybody else; nothing before that
-   depends on it.
+3. **Apply to pid.codes for a product ID** — a pull request to their repository,
+   needing only a public repo with an open-source licence, so it can go in the
+   moment item 1 lands and run in parallel with everything else. Start it early:
+   it is reviewed by volunteers, so the turnaround is not yours to control. Then
+   generate the five copies from one source so the count cannot go 5 → 6. See
+   §2 for why a placeholder is not an acceptable substitute.
 
 4. **Re-test Windows** against the three cases in §8, then move the service to
    LocalService. The installer already grants LOCAL SERVICE rights on the log
