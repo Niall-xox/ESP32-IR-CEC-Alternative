@@ -12,65 +12,24 @@
 
 static constexpr size_t REPORT_SIZE = 64;
 
-// Everything send() does shares one wall-clock budget.
-//
-// logind's InhibitDelayMaxSec defaults to 5s. Once it expires systemd stops
-// waiting for the delay inhibitor and suspends anyway — with the daemon still
-// blocked mid-command, now running across a suspend. The old timeouts were
-// independent rather than pooled, so the reopen path could spend 5s before the
-// 2s ACK wait even started: 7s of blocking to honour a 5s guarantee. Deriving
-// every step from one budget under the limit makes that impossible to hit.
 static constexpr auto SEND_BUDGET = std::chrono::milliseconds(4000);
 
-// The most any caller may ask for, however much time it believes it has.
-//
-// SEND_BUDGET is the default for a caller that states no limit of its own — it
-// is sized against logind's InhibitDelayMaxSec, which is the tightest window
-// this transport runs inside. It is not a ceiling, because it is not the
-// tightest window *every* caller runs inside: Windows preshutdown allows
-// minutes, and capping a shutdown at four seconds throws away the headroom on
-// the one path that has no second chance to leave the TV right.
-//
-// This is the backstop instead. It exists so a wrong budget cannot hang a
-// shutdown indefinitely, not to express any platform's real limit — every
-// caller's own number is far below it.
 static constexpr auto MAX_SEND_BUDGET = std::chrono::seconds(60);
 
-// Longest wait for a reply, further clamped to whatever is left of the budget.
 static constexpr auto ACK_TIMEOUT = std::chrono::milliseconds(2000);
 
-// The constructor does not run inside a power-event handler, so it can wait
-// longer than SEND_BUDGET for the device to finish enumerating at boot.
 static constexpr auto STARTUP_OPEN_TIMEOUT = std::chrono::seconds(3);
 
 static constexpr auto OPEN_POLL = std::chrono::milliseconds(100);
 
-// Bounds the drain loop so a device streaming reports cannot hold us there.
 static constexpr int MAX_DRAIN_REPORTS = 64;
 
-// A write is retried until the budget runs out, so this cap is a backstop
-// against a failure mode that returns instantly — the deadline is the real
-// limit, but only if every attempt costs something. On Windows a failing
-// write already costs about a second inside hidapi.
 static constexpr int MAX_WRITE_ATTEMPTS = 8;
 
-// Between a failed write and the reopen that follows it. Stops an instantly
-// failing write from spinning through the whole budget at full tilt, and gives
-// a device that is re-enumerating somewhere to be.
 static constexpr auto WRITE_RETRY_DELAY = std::chrono::milliseconds(150);
 
-// The USB product string the firmware advertises, used to tell our device from
-// anything else answering to the same VID/PID. Not a substitute for a
-// registered pair — a string is no more unique than the numbers are — but it
-// distinguishes "the first device the OS happened to enumerate" from "the one
-// that says it is ours", which is the difference between a coin flip and a
-// choice. Must match USB.productName() in firmware/src/main.cpp.
 static constexpr wchar_t EXPECTED_PRODUCT[] = L"ESP32 IR Remote";
 
-// Narrows a hidapi wide string for logging. Descriptor strings here are ASCII;
-// anything else becomes '?' rather than dragging locale conversion into a log
-// line. Handles both 2-byte and 4-byte wchar_t, so it is the same code on both
-// platforms.
 static std::string narrow(const wchar_t* w) {
     if (!w) return "(none)";
     std::string out;
@@ -103,17 +62,9 @@ void HIDTransport::closeDevice() {
     }
 }
 
-// Deliberate teardown, as opposed to closeDevice() being reached because
-// something failed. The distinction is only visible in the log, and that is the
-// point: after a USB suspend the firmware re-enumerates itself, so the device
-// disappearing and coming back a second later is expected behaviour rather than
-// a fault, and a log that cannot tell the two apart turns the one path most
-// worth trusting into the one hardest to read.
 void HIDTransport::invalidate() {
     if (!dev_) {
-        // Nothing was open. The notification confirms a state already held, and
-        // saying so is better than silence in a log being read to find out
-        // whether the removal was noticed at all.
+
         std::cout << "[transport] Device removal reported; no handle was open\n";
         return;
     }
@@ -123,21 +74,16 @@ void HIDTransport::invalidate() {
 
 hid_device* HIDTransport::openMatching() {
     hid_device_info* list = hid_enumerate(vid_, pid_);
-    if (!list) return nullptr;  // nothing present; the caller retries
+    if (!list) return nullptr;
 
     int count = 0;
     for (const hid_device_info* d = list; d; d = d->next) ++count;
 
-    // One match is the ordinary case and takes exactly the path it always did.
     if (count == 1) {
         hid_free_enumeration(list);
         return hid_open(vid_, pid_, nullptr);
     }
 
-    // More than one device answers to this VID/PID, and hid_open() would take
-    // whichever the OS enumerated first — a choice that silently changes on
-    // every replug. Naming them all turns "it works sometimes" into something
-    // with a cause attached.
     std::cerr << "[transport] " << count << " devices match VID="
               << std::hex << vid_ << " PID=" << pid_ << std::dec
               << " — the placeholder IDs are not unique. Candidates:\n";
@@ -164,9 +110,7 @@ hid_device* HIDTransport::openMatching() {
                   << narrow(EXPECTED_PRODUCT) << "\"\n";
         opened = hid_open_path(chosen->path);
     } else {
-        // Nothing claims to be us. Falling back to the first match keeps the
-        // old behaviour rather than refusing to run, but it is a guess and
-        // says so.
+
         std::cerr << "[transport] None identifies as \"" << narrow(EXPECTED_PRODUCT)
                   << "\" — falling back to the first match, which may not be"
                      " the ESP32\n";
@@ -177,19 +121,6 @@ hid_device* HIDTransport::openMatching() {
     return opened;
 }
 
-// Dumps the report descriptor as the *host* parsed it, which is not necessarily
-// the one the firmware meant to publish.
-//
-// Windows derives the required output-report length from this and rejects a
-// write that does not match, so a descriptor fetched during a window where the
-// device was not ready produces a handle that opens cleanly and then fails
-// every write. It is cached against the device instance, so it persists across
-// process restarts and clears only on re-enumeration — an intermittency that
-// follows replugs rather than time.
-//
-// The firmware's descriptor is 34 bytes and ends 0x91 0x02 0xC0: an Output item
-// then end-collection. A short dump, or one with no 0x91, is the host holding a
-// descriptor with no output report — nowhere to write to.
 void HIDTransport::logReportDescriptor() {
 #if defined(HID_API_VERSION_MAJOR) && \
     (HID_API_VERSION_MAJOR > 0 || HID_API_VERSION_MINOR >= 14)
@@ -235,7 +166,7 @@ bool HIDTransport::ensureOpen(TimePoint deadline) {
                       << std::hex << vid_ << " PID=" << pid_ << std::dec << ")\n";
             return true;
         }
-        // Stop before a sleep that would overrun the deadline.
+
         if (Clock::now() + OPEN_POLL >= deadline) return false;
         std::this_thread::sleep_for(OPEN_POLL);
     }
@@ -244,7 +175,7 @@ bool HIDTransport::ensureOpen(TimePoint deadline) {
 void HIDTransport::drainInput() {
     uint8_t scratch[REPORT_SIZE];
     for (int i = 0; i < MAX_DRAIN_REPORTS; ++i) {
-        // Zero timeout — return what is already queued, never block.
+
         if (hid_read_timeout(dev_, scratch, sizeof(scratch), 0) <= 0) return;
     }
     std::cerr << "[transport] Input queue still not empty after draining "
@@ -257,20 +188,7 @@ uint8_t HIDTransport::nextSequence() {
 }
 
 bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget) {
-    // Zero means the caller has no limit of its own and gets SEND_BUDGET.
-    //
-    // A stated budget is honoured as given, in both directions, because it is
-    // the caller — not this transport — that knows how long its OS will wait.
-    // Linux states nothing and gets the 4s sized against logind; Windows states
-    // ~1.5s for a suspend it cannot delay, and tens of seconds for a shutdown
-    // that preshutdown allows minutes for.
-    //
-    // This used to clamp down to SEND_BUDGET on the reasoning that a caller may
-    // ask for less but never more. That kept one platform's limit as every
-    // platform's ceiling, and silently capped the Windows shutdown — the one
-    // send with real headroom and no retry after it — at four seconds. Only
-    // MAX_SEND_BUDGET bounds it now, and that is a backstop against a bug, not
-    // a policy.
+
     const auto effective = (budget <= std::chrono::milliseconds::zero())
                                ? SEND_BUDGET
                                : std::min(budget,
@@ -284,29 +202,15 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
         return false;
     }
 
-    // Clear replies to commands we already gave up on, so they cannot be
-    // mistaken for the answer to this one. The sequence check in awaitAck()
-    // catches what slips through after this point; draining first keeps the
-    // common case from having to.
     drainInput();
 
     const uint8_t seq = nextSequence();
 
-    // txBuf[0] is the HID report ID — 0, as the descriptor declares no IDs.
-    // The 64-byte payload follows: [0] sequence, [1..] NUL-terminated command.
     uint8_t txBuf[REPORT_SIZE + 1] = {0};
     txBuf[0] = 0x00;
     txBuf[1] = seq;
     std::memcpy(txBuf + 2, cmd.c_str(), std::min(cmd.size(), REPORT_SIZE - 2));
 
-    // Write, and on failure reopen and try again for as long as the budget
-    // allows rather than giving up after a single retry.
-    //
-    // The device re-enumerates itself after a USB suspend — see the recovery in
-    // the firmware — and that takes around a second, during which it is simply
-    // absent. One retry lands inside that window and reports a failure for a
-    // device that was about to be fine. The budget is the honest limit on how
-    // long to keep trying, and it is already the limit on everything else here.
     bool written = false;
     for (int attempt = 1; attempt <= MAX_WRITE_ATTEMPTS; ++attempt) {
         if (hid_write(dev_, txBuf, sizeof(txBuf)) >= 0) {
@@ -317,14 +221,9 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
             break;
         }
 
-        // Report what the backend said. "Write failed" alone cannot distinguish
-        // a device unplugged mid-command from one whose endpoint has stopped
-        // being serviced, and those look identical until the error is named.
         std::cerr << "[transport] Write failed on attempt " << attempt << " ("
                   << narrow(hid_error(dev_)) << ")\n";
 
-        // Once only. It is the same descriptor on every attempt, and it is
-        // long.
         if (attempt == 1) logReportDescriptor();
 
         closeDevice();
@@ -343,10 +242,7 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
 }
 
 bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadline) {
-    // ACK_TIMEOUT bounds this wait on its own, and the shared deadline bounds it
-    // again. A tightened budget therefore shortens the ACK wait automatically,
-    // rather than needing a second platform-specific constant kept in step with
-    // the first by hand.
+
     const TimePoint ackDeadline = std::min(deadline, Clock::now() + ACK_TIMEOUT);
 
     while (true) {
@@ -359,18 +255,14 @@ bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadl
                                          static_cast<int>(remaining.count()));
 
         if (res < 0) {
-            // The handle is dead — usually the device was unplugged mid-command.
-            // Drop it so the next send() reopens rather than failing again.
+
             std::cerr << "[transport] Read failed (" << narrow(hid_error(dev_))
                       << ") — dropping device handle\n";
             closeDevice();
             return false;
         }
-        if (res == 0) break;  // nothing arrived before the deadline
+        if (res == 0) break;
 
-        // rxBuf[0] echoes the sequence of the command being answered. Anything
-        // else is a reply to a command we already gave up on: discard it and
-        // keep waiting for ours instead of counting it as success.
         if (res < 4 || rxBuf[0] != seq) {
             std::cerr << "[transport] Discarding unmatched reply (seq "
                       << static_cast<int>(rxBuf[0]) << ", expected "
@@ -382,7 +274,7 @@ bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadl
         const char* body = reinterpret_cast<const char*>(rxBuf) + 1;
 
         if (std::strncmp(body, "ACK", 3) == 0) {
-            return true;  // IR signal confirmed transmitted
+            return true;
         }
         if (std::strncmp(body, "ERR", 3) == 0) {
             std::cerr << "[transport] ESP32 returned ERR for command: " << cmd

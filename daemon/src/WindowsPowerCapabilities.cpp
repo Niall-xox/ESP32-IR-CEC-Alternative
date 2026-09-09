@@ -7,26 +7,6 @@
 
 namespace {
 
-// SYSTEM_POWER_CAPABILITIES, declared here in full rather than taken from the
-// toolchain's headers.
-//
-// The two fields this daemon most needs — AoAc, which is how a machine says it
-// is Modern Standby, and Hiberboot, which is Fast Startup — were appended by
-// Microsoft into bytes an earlier version of the struct reserved as spare. A
-// current Windows SDK declares them; mingw-w64's winnt.h still carries the older
-// layout and does not, so the cross-compile the tree is checked with would not
-// build against the SDK definition even though MSVC would.
-//
-// Depending on the header therefore means the capability report exists or not
-// according to which toolchain compiled it, which is the worst of the options:
-// the field that says what kind of machine this is would go missing on the
-// builds least likely to be noticed. The layout is documented and stable —
-// growth has only ever been into the reserved bytes — so declaring it once here
-// makes the reading identical on every toolchain.
-//
-// The static_assert below is the guard. If a future SDK grows the struct past
-// this, the size check fails at compile time rather than the OS quietly
-// rejecting an output buffer it considers too small.
 struct SystemPowerCapabilitiesFull {
     BOOLEAN PowerButtonPresent;
     BOOLEAN SleepButtonPresent;
@@ -46,9 +26,9 @@ struct SystemPowerCapabilitiesFull {
     UCHAR   ProcessorMinThrottle;
     UCHAR   ProcessorMaxThrottle;
     BOOLEAN FastSystemS4;
-    BOOLEAN Hiberboot;              // Fast Startup
+    BOOLEAN Hiberboot;
     BOOLEAN WakeAlarmPresent;
-    BOOLEAN AoAc;                   // Modern Standby / S0 low power idle
+    BOOLEAN AoAc;
     BOOLEAN DiskSpinDown;
     BYTE    HiberFileType;
     BOOLEAN AoAcConnectivitySupported;
@@ -63,22 +43,15 @@ struct SystemPowerCapabilitiesFull {
     SYSTEM_POWER_STATE DefaultLowLatencyWake;
 };
 
-// The buffer handed to the OS must be at least the size the OS expects. Both
-// definitions describe the same documented structure, so a toolchain whose own
-// declaration is *larger* than this one means this one has fallen behind and
-// needs the new fields appending.
 static_assert(sizeof(SystemPowerCapabilitiesFull) >= sizeof(SYSTEM_POWER_CAPABILITIES),
               "SYSTEM_POWER_CAPABILITIES has grown past the layout declared here — "
               "append the new fields to SystemPowerCapabilitiesFull");
 
-// CallNtPowerInformation returns an NTSTATUS, not a Win32 error. Zero is
-// STATUS_SUCCESS; anything else is a failure whose value is not a GetLastError()
-// code and must not be printed as one.
 constexpr LONG NT_SUCCESS_STATUS = 0;
 
 const char* yesNo(bool v) { return v ? "yes" : "no"; }
 
-} // namespace
+}
 
 WindowsPowerCapabilities queryPowerCapabilities() {
     WindowsPowerCapabilities caps;
@@ -88,8 +61,7 @@ WindowsPowerCapabilities queryPowerCapabilities() {
                                                nullptr, 0,
                                                &spc, sizeof(spc));
     if (status != NT_SUCCESS_STATUS) {
-        // queried stays false. The caller reports "unknown", which is the
-        // honest answer and distinct from a machine that supports nothing.
+
         return caps;
     }
 
@@ -110,14 +82,6 @@ std::string WindowsPowerCapabilities::summary() const {
         return "power model unknown — the OS did not answer";
     }
 
-    // Sleep model first: it is the axis that decides whether the suspend and
-    // resume events arrive at all, and therefore the one that changes how the
-    // rest of the log should be read.
-    //
-    // Modern Standby and S3 are mutually exclusive platform properties, so this
-    // is a choice between them rather than a list. A machine reporting both, or
-    // neither, is a real finding and says so rather than being tidied into the
-    // nearest plausible row.
     std::string sleepModel;
     if (modernStandby && s3) {
         sleepModel = "BOTH Modern Standby and S3 reported — unexpected";
@@ -164,4 +128,4 @@ std::vector<std::string> WindowsPowerCapabilities::details() const {
     return lines;
 }
 
-#endif // _WIN32
+#endif

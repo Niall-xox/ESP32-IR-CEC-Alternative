@@ -1,23 +1,3 @@
-// ESP32 IR Remote — Firmware
-//
-// Presents the ESP32-S3 as a USB HID device. Receives commands from the PC
-// daemon as HID output reports, fires the IR signal for the active manufacturer
-// profile, updates the OLED display, and sends a response as an input report.
-//
-// Communication protocol (v2 — sequence-correlated):
-//   PC → ESP32:  64-byte output report, [0] = sequence, [1..] = NUL-terminated command
-//   ESP32 → PC:  64-byte input report,  [0] = echoed sequence, [1..] = NUL-terminated response
-//
-//   ON   → fire IR ON  for active profile → ACK
-//   OFF  → fire IR OFF for active profile → ACK
-//   ON/OFF with an unset (0x0) code       → ERR
-//   ???                                   → ERR
-//
-// The sequence byte is echoed rather than interpreted. It exists so the daemon
-// can tell this reply apart from a late reply to an earlier command: without it
-// an ACK that arrived after the daemon gave up satisfied the *next* command's
-// read, reporting success for an IR signal that may never have fired.
-
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -30,30 +10,25 @@
 #include <ArduinoJson.h>
 #include "USB.h"
 #include "USBHID.h"
-// tud_disconnect() / tud_connect() — the software equivalent of a replug.
-// See the USB suspend recovery below for why the firmware needs them.
+
 #include "tusb.h"
 #include "Profiles.h"
 #include "Button.h"
 #include "Display.h"
 
-// --- Pin config ---
 #define IR_TX_PIN    4
 #define OLED_SDA     2
 #define OLED_SCL     3
 #define BUTTON_PIN   5
 
-// --- OLED config ---
 #define OLED_WIDTH  128
 #define OLED_HEIGHT  32
 #define OLED_ADDR   0x3C
 
-// --- USB HID config ---
 #define DEVICE_VID  0x1234
 #define DEVICE_PID  0x5678
 #define REPORT_SIZE    64
 
-// --- WiFi AP config ---
 #define WIFI_SSID  "ESP32-IR-Remote"
 #define WIFI_PASS  "irremote123"
 
@@ -66,19 +41,16 @@ static const uint8_t REPORT_DESCRIPTOR[] = {
     0x26, 0xFF, 0x00,
     0x75, 0x08,
     0x95, REPORT_SIZE,
-    0x81, 0x02,              // Input  (ESP32 → PC)
+    0x81, 0x02,
     0x09, 0x02,
     0x15, 0x00,
     0x26, 0xFF, 0x00,
     0x75, 0x08,
     0x95, REPORT_SIZE,
-    0x91, 0x02,              // Output (PC → ESP32)
+    0x91, 0x02,
     0xC0
 };
 
-// ---------------------------------------------------------------------------
-// Hardware instances
-// ---------------------------------------------------------------------------
 Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 IRsend           irSend(IR_TX_PIN);
 USBHID           HID;
@@ -86,18 +58,10 @@ Button           button(BUTTON_PIN);
 Display          display(oled);
 WebServer        server(80);
 
-// ---------------------------------------------------------------------------
-// Application state
-// ---------------------------------------------------------------------------
 bool    wifiActive = false;
 
-// Tracks whether this is the first or second press in a display-on window.
-// Reset to 0 when display turns off (via display.onExpire) or a hold begins.
 uint8_t pressCount = 0;
 
-// ---------------------------------------------------------------------------
-// USB HID device class
-// ---------------------------------------------------------------------------
 class VendorHID : public USBHIDDevice {
 public:
     VendorHID() {}
@@ -110,9 +74,7 @@ public:
     }
 
     void _onOutput(uint8_t report_id, const uint8_t* buffer, uint16_t len) override {
-        // A command is a sequence byte plus at least one character. Anything
-        // shorter cannot be one, and accepting it would leave loop() parsing
-        // whatever the previous report left behind in rxBuf_.
+
         if (len < 2) return;
 
         uint16_t copyLen = min((int)len, REPORT_SIZE - 1);
@@ -125,60 +87,23 @@ public:
         return HID.SendReport(0, data, REPORT_SIZE);
     }
 
-    // Written by _onOutput() on the TinyUSB task, read by loop() on the Arduino
-    // task. volatile stops the compiler from caching received_ in a register
-    // and never observing the change. The protocol is strictly request/response
-    // — the daemon sends one command and waits for the reply before sending
-    // another — so there is no window for a second report to overwrite rxBuf_
-    // while loop() is reading it.
     volatile bool received_     = false;
     uint8_t rxBuf_[REPORT_SIZE] = {0};
 };
 
 VendorHID hidDevice;
 
-// ---------------------------------------------------------------------------
-// USB suspend recovery
-// ---------------------------------------------------------------------------
-//
-// This device does not survive a USB suspend. When the host powers the bus
-// down — Windows selective suspend when nothing holds a handle open, or any
-// system entering sleep — the device comes back mounted but stops servicing
-// its OUT endpoint. The host's writes are NAKed indefinitely: opening the
-// device still succeeds, and every write then fails on a completion timeout.
-// It stays that way until the device is physically re-enumerated, which is
-// why the symptom presents as "works for a while, then refuses until it is
-// unplugged and plugged back in".
-//
-// Diagnosed on Windows 2026-08-24, but it is not a Windows defect. Linux hid
-// it because its daemon holds the device open continuously, so the host never
-// suspends an idle device — a difference in host behaviour, not in ours.
-// Anything that suspends the bus reaches it.
-//
-// The fix is to stop trusting the USB state across a suspend and rebuild it:
-// tud_disconnect() drops the D+ pullup and tud_connect() raises it again,
-// which is a replug the user does not have to perform. A clean resume is
-// re-enumerated unnecessarily, which costs about a second of unavailability
-// and is invisible; a broken one is repaired. Recovering unconditionally
-// beats trying to detect which happened, because the device cannot tell:
-// a wedged OUT endpoint and an idle one look identical from this side.
-//
-// The work happens in loop() rather than in the event callback. The callback
-// runs on the Arduino event task, and tearing down USB from inside a USB
-// event is how a deadlock gets built.
 volatile bool usbResumePending = false;
 volatile bool usbWasSuspended  = false;
 
-static void onUsbEvent(void* /*arg*/, esp_event_base_t /*base*/,
-                       int32_t id, void* /*data*/) {
+static void onUsbEvent(void* , esp_event_base_t ,
+                       int32_t id, void* ) {
     switch (id) {
     case ARDUINO_USB_SUSPEND_EVENT:
         usbWasSuspended = true;
         break;
     case ARDUINO_USB_RESUME_EVENT:
-        // Only a resume that follows a suspend we actually saw. Resume is
-        // also raised in situations that never powered the bus down, and
-        // re-enumerating on those would be churn for nothing.
+
         if (usbWasSuspended) {
             usbWasSuspended  = false;
             usbResumePending = true;
@@ -189,7 +114,6 @@ static void onUsbEvent(void* /*arg*/, esp_event_base_t /*base*/,
     }
 }
 
-// Re-enumerates if a suspend/resume cycle has been seen since the last check.
 static void serviceUsbRecovery() {
     if (!usbResumePending) return;
     usbResumePending = false;
@@ -197,18 +121,10 @@ static void serviceUsbRecovery() {
     Serial.println("[usb] Resumed from suspend — re-enumerating");
 
     tud_disconnect();
-    delay(100);   // long enough for the host to register the disconnect
+    delay(100);
     tud_connect();
 }
 
-// ---------------------------------------------------------------------------
-// IR dispatch — synchronous, blocks until the full signal is transmitted.
-//
-// Returns false without transmitting when the active profile has no code set
-// for this direction. A 0x0 code is the placeholder for a manufacturer whose
-// discrete codes have not been confirmed yet; sending it puts a meaningless
-// frame on the air, and the caller must not report that as success.
-// ---------------------------------------------------------------------------
 bool sendIR(const Profile& profile, bool on) {
     if (!Profiles::isConfigured(profile, on)) {
         Serial.printf("[ir] %s has no %s code configured — not transmitting\n",
@@ -232,9 +148,6 @@ bool sendIR(const Profile& profile, bool on) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// WiFi AP + Web Server
-// ---------------------------------------------------------------------------
 void stopWifi();
 
 void startWifi() {
@@ -244,14 +157,10 @@ void startWifi() {
     Serial.printf("[wifi] AP started — SSID: %s  IP: %s\n", WIFI_SSID, apIP.c_str());
     display.setWifiIP(apIP);
 
-    // --- API endpoints ---
-
-    // GET /api/profiles — return all profiles as JSON array
     server.on("/api/profiles", HTTP_GET, []() {
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
-        // Profiles::toJson is the same serialiser LittleFS writes through, so
-        // the web API and the on-disk format cannot drift apart.
+
         for (const auto& p : Profiles::getAll()) {
             Profiles::toJson(p, arr.add<JsonObject>());
         }
@@ -260,7 +169,6 @@ void startWifi() {
         server.send(200, "application/json", json);
     });
 
-    // POST /api/profiles — replace all profiles from JSON body
     server.on("/api/profiles", HTTP_POST, []() {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, server.arg("plain"));
@@ -268,9 +176,7 @@ void startWifi() {
             server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
             return;
         }
-        // Replace in-memory profiles and save. Profiles::fromJson performs the
-        // same validation used when loading from LittleFS, so a request with
-        // missing or malformed fields yields safe defaults instead of crashing.
+
         std::vector<Profile> newProfiles;
         for (JsonObjectConst obj : doc.as<JsonArrayConst>()) {
             newProfiles.push_back(Profiles::fromJson(obj));
@@ -291,7 +197,6 @@ void startWifi() {
         server.send(200, "application/json", "{\"ok\":true}");
     });
 
-    // GET /api/settings — return settings as JSON
     server.on("/api/settings", HTTP_GET, []() {
         const Settings& s = Profiles::getSettings();
         JsonDocument doc;
@@ -302,7 +207,6 @@ void startWifi() {
         server.send(200, "application/json", json);
     });
 
-    // POST /api/settings — update settings from JSON body
     server.on("/api/settings", HTTP_POST, []() {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, server.arg("plain"));
@@ -310,8 +214,7 @@ void startWifi() {
             server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
             return;
         }
-        // is<T>() replaces the deprecated containsKey() in ArduinoJson 7 and
-        // additionally rejects a key that is present but of the wrong type.
+
         Settings& s = Profiles::getMutableSettings();
         if (doc["active_profile"].is<int>()) {
             int idx = doc["active_profile"].as<int>();
@@ -327,21 +230,18 @@ void startWifi() {
         server.send(200, "application/json", "{\"ok\":true}");
     });
 
-    // POST /api/factory-reset — restore defaults and exit WiFi mode
     server.on("/api/factory-reset", HTTP_POST, []() {
         Profiles::factoryReset();
         server.send(200, "application/json", "{\"ok\":true}");
-        wifiActive = false;  // Deferred WiFi stop via loop()
-    });
-
-    // POST /api/exit — save and exit wireless config mode
-    server.on("/api/exit", HTTP_POST, []() {
-        server.send(200, "application/json", "{\"ok\":true}");
-        // Defer stop to next loop() so the response is sent first
         wifiActive = false;
     });
 
-    // Serve static files from LittleFS (web UI)
+    server.on("/api/exit", HTTP_POST, []() {
+        server.send(200, "application/json", "{\"ok\":true}");
+
+        wifiActive = false;
+    });
+
     server.onNotFound([]() {
         String path = server.uri();
         if (path == "/") path = "/index.html";
@@ -372,9 +272,6 @@ void stopWifi() {
     Serial.println("[wifi] AP stopped");
 }
 
-// Shared cleanup after leaving WiFi mode — stops WiFi, updates display,
-// and resets the press counter. Used by button exit, factory reset, and
-// the deferred exit/factory-reset from the web UI.
 void finishExitWifi() {
     if (WiFi.getMode() != WIFI_OFF) stopWifi();
     wifiActive = false;
@@ -384,31 +281,27 @@ void finishExitWifi() {
     pressCount = 1;
 }
 
-// ---------------------------------------------------------------------------
-// Button callbacks
-// ---------------------------------------------------------------------------
 void onButtonPress() {
     pressCount++;
     bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
 
     if (wifiActive) {
         if (pressCount == 1) {
-            // First press in WiFi mode: show status screen
+
             display.showStatus(Profiles::getActive().name, true);
         } else {
-            // Second press and beyond in WiFi mode: show lock message.
+
             display.showWifiLockMessage();
             pressCount = 1;
         }
         return;
     }
 
-    // Normal operation
     if (pressCount == 1) {
-        // First press: show status screen
+
         display.showStatus(Profiles::getActive().name, alwaysOn);
     } else {
-        // Second press and beyond: cycle to next visible profile and refresh display.
+
         int next = Profiles::nextVisibleIndex();
         Profiles::getMutableSettings().activeProfile = next;
         Profiles::saveSettings();
@@ -419,12 +312,11 @@ void onButtonPress() {
 }
 
 void onButtonHold(uint32_t heldMs) {
-    // A hold cancels any in-progress press sequence
+
     pressCount = 0;
 
     if (heldMs >= 23000) {
-        // Factory reset has already triggered — stop updating the display so
-        // the status screen drawn by onFactoryReset is not overwritten
+
         return;
     } else if (heldMs >= 8000) {
         display.showResetBar(heldMs);
@@ -436,14 +328,14 @@ void onButtonHold(uint32_t heldMs) {
 }
 
 void onConfigThreshold() {
-    // Button released at 5s — toggle WiFi config mode
+
     if (wifiActive) {
         finishExitWifi();
     } else {
         wifiActive = true;
         display.setWifiActive(true);
         startWifi();
-        // In WiFi mode the status screen is always-on
+
         display.showStatus(Profiles::getActive().name, true);
         pressCount = 1;
     }
@@ -455,15 +347,9 @@ void onFactoryReset() {
     finishExitWifi();
 }
 
-// ---------------------------------------------------------------------------
-// Setup
-// ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
 
-    // A false return means LittleFS is unavailable, so profiles cannot be
-    // loaded or persisted. The device stays usable on the built-in fallback
-    // profile — worth logging loudly, but not worth halting for.
     if (!Profiles::begin()) {
         Serial.println("[app] Profile storage unavailable — using fallback profile");
     }
@@ -477,7 +363,7 @@ void setup() {
     button.onPress           = onButtonPress;
     button.onHold            = onButtonHold;
     button.onHoldCancelled   = []() {
-        // Bar was filling but button released before threshold — show status screen.
+
         bool alwaysOn = Profiles::getSettings().displayAlwaysOn || wifiActive;
         display.showStatus(Profiles::getActive().name, alwaysOn);
         pressCount = 1;
@@ -485,17 +371,8 @@ void setup() {
     button.onConfigThreshold = onConfigThreshold;
     button.onFactoryReset    = onFactoryReset;
 
-    // When the STATUS screen timer expires and the display turns off,
-    // reset pressCount so the next press is treated as a first press again.
     display.onExpire = []() { pressCount = 0; };
 
-    // Draw the status screen once the display and profiles are both up.
-    //
-    // Without this the OLED stayed blank from boot until the first button press
-    // or IR command, which contradicted "display always on" outright — the one
-    // setting whose entire purpose is that the screen is never blank. With the
-    // setting off, showStatus starts its own 2s timer, so this doubles as a
-    // boot confirmation and then turns itself off.
     display.showStatus(Profiles::getActive().name,
                        Profiles::getSettings().displayAlwaysOn);
 
@@ -507,7 +384,6 @@ void setup() {
     USB.productName("ESP32 IR Remote");
     USB.manufacturerName("ESP32-IR-CEC");
 
-    // Registered before USB.begin() so the first suspend cannot be missed.
     USB.onEvent(ARDUINO_USB_SUSPEND_EVENT, onUsbEvent);
     USB.onEvent(ARDUINO_USB_RESUME_EVENT, onUsbEvent);
 
@@ -515,30 +391,22 @@ void setup() {
     HID.begin();
 }
 
-// ---------------------------------------------------------------------------
-// Loop
-// ---------------------------------------------------------------------------
 void loop() {
     button.update();
     display.update();
 
-    // Before anything reads from USB: if the bus was suspended and resumed,
-    // the endpoint state is not to be trusted until it has been rebuilt.
     serviceUsbRecovery();
 
     if (wifiActive) {
         server.handleClient();
     } else if (WiFi.getMode() != WIFI_OFF) {
-        // Deferred stop from /api/exit or /api/factory-reset —
-        // response has been sent, now shut down and return to normal.
+
         finishExitWifi();
     }
 
     if (!hidDevice.received_) return;
     hidDevice.received_ = false;
 
-    // [0] is the daemon's sequence byte, echoed back untouched so it can match
-    // this reply to the command it sent. The command string starts at [1].
     const uint8_t seq = hidDevice.rxBuf_[0];
 
     String cmd = String((char*)hidDevice.rxBuf_ + 1);
@@ -550,9 +418,6 @@ void loop() {
     uint8_t response[REPORT_SIZE] = {0};
     response[0] = seq;
 
-    // ACK only once the IR signal has actually gone out. An unconfigured
-    // profile transmits nothing, so it answers ERR — reporting success there
-    // would leave the daemon logging a TV state change that never happened.
     bool ok = false;
     if (cmd == "ON" || cmd == "OFF") {
         const bool on = (cmd == "ON");
@@ -567,9 +432,7 @@ void loop() {
     memcpy(response + 1, ok ? "ACK" : "ERR", 3);
 
     if (!hidDevice.send(response)) {
-        // The daemon is waiting on this and will time out without it. Nothing
-        // to retry against — the report queue is full or USB is not ready —
-        // but it must not pass silently.
+
         Serial.println("[hid] Failed to queue response report");
     }
 }

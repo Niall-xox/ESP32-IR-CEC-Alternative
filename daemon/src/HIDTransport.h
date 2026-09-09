@@ -5,90 +5,33 @@
 #include <cstdint>
 #include <string>
 
-// ITransport implementation using USB HID.
-//
-// Finds the ESP32 by VID/PID, sends commands as 64-byte output reports, and
-// waits for the matching ACK or ERR input report before returning.
-//
-// Wire format (both directions, 64-byte payload):
-//   [0]    sequence byte — echoed by the device, never 0
-//   [1..]  NUL-terminated ASCII: "ON" / "OFF" out, "ACK" / "ERR" back
-//
-// The sequence byte is what makes an ACK trustworthy. hidraw queues input
-// reports, so a reply that arrived after send() gave up on it stayed buffered
-// and satisfied the *next* command's read — returning true for an IR signal
-// that command never sent. Replies whose sequence does not match the request
-// are discarded rather than accepted.
-//
-// send() is synchronous — it blocks until the device responds. That is what
-// lets the daemon release the systemd inhibitor lock the moment send() returns,
-// knowing the IR signal has actually been transmitted. Every step it takes
-// shares one wall-clock budget, deliberately smaller than logind's
-// InhibitDelayMaxSec, so it cannot outlive the lock it is holding things up for.
-//
-// A caller that knows its own limit passes it, in either direction. A Windows
-// suspend has less — the machine goes down about two seconds after the
-// notification and nothing can delay it. A Windows *shutdown* has far more,
-// because preshutdown allows minutes. SEND_BUDGET in the .cpp is the default
-// for a caller that states nothing, not a ceiling for those that do; only
-// MAX_SEND_BUDGET bounds a stated one, and that is a backstop against a bug.
-//
-// If the device is missing or has been unplugged, send() attempts to reopen it,
-// then logs and returns false rather than throwing — the system still has to be
-// allowed to sleep or shut down.
 class HIDTransport : public ITransport {
 public:
-    // Throws std::runtime_error if the HID backend cannot be initialised.
-    // A device that is simply absent is not an error — send() retries.
+
     HIDTransport(uint16_t vid, uint16_t pid);
     ~HIDTransport() override;
 
-    // Returns true only once a matching ACK has been received — see ITransport::send.
-    // A zero budget means "use SEND_BUDGET"; any stated budget is honoured as
-    // given, bounded only by MAX_SEND_BUDGET.
     bool send(const std::string& cmd,
               std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
 
-    // Closes the handle so the next send() opens the device afresh.
-    //
-    // Called when a Windows device-removal notification says the ESP32 has
-    // gone. Dropping the handle deliberately is not faster than discovering
-    // it on the next failed write — it is one line in the log saying which
-    // of the two happened, on the path where the device re-enumerating
-    // itself after a USB suspend makes that distinction the whole question.
-    //
-    // Safe when nothing is open: closing twice is not an error here.
     void invalidate() override;
 
 private:
     using Clock     = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
-    // Opens the device if it is not already open, retrying until `deadline`.
     bool ensureOpen(TimePoint deadline);
 
-    // One attempt at opening the right device. When several answer to the
-    // VID/PID it names them all and prefers the one whose USB product string
-    // identifies it, rather than taking whichever the OS enumerated first —
-    // an order that changes on every replug.
     hid_device* openMatching();
 
-    // Logs the report descriptor the *host* holds, which is what Windows
-    // derives the required write length from. Called when a write fails,
-    // because that is where the difference between it and the firmware's
-    // descriptor explains the failure.
     void logReportDescriptor();
 
     void closeDevice();
 
-    // Discards reports left over from commands that already timed out.
     void drainInput();
 
-    // Next sequence value, wrapping 1..255. Never 0, so a zeroed buffer
-    // cannot be mistaken for a valid reply.
     uint8_t nextSequence();
 
-    // Reads until a reply carrying `seq` arrives, or the budget runs out.
     bool awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadline);
 
     uint16_t    vid_;

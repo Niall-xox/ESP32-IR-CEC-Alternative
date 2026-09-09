@@ -15,7 +15,7 @@ void Display::update() {
         switch (timerAction_) {
             case TimerAction::TurnOff:
                 off();
-                // Notify main so pressCount can be reset
+
                 if (onExpire) onExpire();
                 break;
             case TimerAction::ShowStatus:
@@ -24,10 +24,6 @@ void Display::update() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// State setters
-// ---------------------------------------------------------------------------
 
 void Display::showStatus(const String& profileName, bool alwaysOn) {
     if (!ok_) return;
@@ -67,7 +63,6 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     if (!ok_) return;
     timerActive_ = false;
 
-    // 5-block bar filling across the window the config threshold spans
     constexpr uint32_t BAR_START = HoldTimings::PRESS_MAX_MS;
     constexpr uint32_t BAR_SPAN  = HoldTimings::CONFIG_MS - BAR_START;
 
@@ -75,7 +70,6 @@ void Display::showHoldBar(uint32_t heldMs, bool enteringWifi) {
     uint8_t  filled  = (uint8_t)((elapsed * 5) / BAR_SPAN);
     if (filled > 5) filled = 5;
 
-    // Nothing visible has changed since the last call — skip the I2C transfer.
     if (barKind_ == BarKind::Hold && barFilled_ == filled && barFlag_ == enteringWifi) return;
     barKind_   = BarKind::Hold;
     barFilled_ = filled;
@@ -97,7 +91,6 @@ void Display::showResetBar(uint32_t heldMs) {
     if (!ok_) return;
     timerActive_ = false;
 
-    // 15-segment bar filling across the window the reset trigger spans
     constexpr uint32_t BAR_START = HoldTimings::RESET_START_MS;
     constexpr uint32_t BAR_SPAN  = HoldTimings::RESET_END_MS - BAR_START;
 
@@ -105,7 +98,6 @@ void Display::showResetBar(uint32_t heldMs) {
     uint8_t  filled  = (uint8_t)((elapsed * 15) / BAR_SPAN);
     if (filled > 15) filled = 15;
 
-    // Nothing visible has changed since the last call — skip the I2C transfer.
     if (barKind_ == BarKind::Reset && barFilled_ == filled) return;
     barKind_   = BarKind::Reset;
     barFilled_ = filled;
@@ -195,12 +187,6 @@ void Display::setWifiIP(const String& ip) {
     wifiIP_ = ip;
 }
 
-// ---------------------------------------------------------------------------
-// Internal draw helpers
-// ---------------------------------------------------------------------------
-
-// Invalidate the progress bar cache so the next bar screen always redraws.
-// Called by every screen that overwrites a bar.
 void Display::resetBarCache() {
     barKind_   = BarKind::None;
     barFilled_ = -1;
@@ -214,7 +200,7 @@ void Display::drawStatus(const String& profileName) {
     oled_.setTextColor(SSD1306_WHITE);
 
     if (wifiActive_) {
-        // Three-line layout: profile / wifi status / hostname
+
         oled_.setCursor(0, 0);
         oled_.print("Profile: ");
         oled_.print(profileName);
@@ -225,7 +211,7 @@ void Display::drawStatus(const String& profileName) {
         oled_.setCursor(0, 22);
         oled_.print(wifiIP_);
     } else {
-        // Single line: profile name, vertically centered
+
         oled_.setCursor(0, 12);
         oled_.print("Profile: ");
         oled_.print(profileName);

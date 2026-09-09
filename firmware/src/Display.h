@@ -1,18 +1,5 @@
 #pragma once
 
-// Display — OLED state management for the 128x32 SSD1306.
-//
-// States:
-//   OFF        — blank
-//   STATUS     — profile name (+ WiFi: Active when in WiFi mode)
-//   IR_CONFIRM — "TV On" or "TV Off" for 2 seconds after an IR command
-//   HOLD_BAR   — 5-block progress bar while button held (config mode countdown)
-//   RESET_BAR  — 15-segment bar when held past config threshold
-//   WIFI_MSG   — "Hold Button to Exit Wireless Mode..." on press 2 in WiFi mode
-//   NOT_CONFIG — "Not Configured" when the active profile has no IR code set
-//
-// Timed states expire automatically — call update() on every loop() iteration.
-
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <functional>
@@ -21,48 +8,32 @@
 
 class Display {
 public:
-    // Fired when the STATUS screen timer expires and the display turns off.
-    // Used by main.cpp to reset the press counter.
+
     std::function<void()> onExpire;
 
     Display(Adafruit_SSD1306& oled);
 
     void begin();
-    void update();  // Call every loop() — handles timed state expiry
+    void update();
 
-    // --- State setters ---
-
-    // Show status screen. In non-always-on mode starts a 2s timer then turns off.
     void showStatus(const String& profileName, bool alwaysOn);
 
-    // Show "TV On" or "TV Off" for 2s then turn off (or return to status if always-on).
     void showIRConfirm(bool on, bool alwaysOn, const String& profileName);
 
-    // Show the hold progress bar. Called repeatedly by Button::onHold.
     void showHoldBar(uint32_t heldMs, bool enteringWifi);
 
-    // Show the factory reset countdown bar.
     void showResetBar(uint32_t heldMs);
 
-    // Show "Release To Enter/Exit Wireless Config!" at the 5s threshold.
     void showConfigRelease(bool entering);
 
-    // Show "Hold Button to Exit Wireless Mode to Switch Profiles" for 2s.
     void showWifiLockMessage();
 
-    // Show "Not Configured" for 2s after an IR command that could not be sent
-    // because the active profile's code for that direction is still 0x0.
-    // Behaves like showIRConfirm otherwise — same timeout, same return state.
     void showNotConfigured(bool alwaysOn, const String& profileName);
 
-    // Turn display off.
     void off();
 
-    // Notify the display module when WiFi mode changes so the status screen
-    // shows or hides the "WiFi: Active" line correctly.
     void setWifiActive(bool active);
 
-    // Set the AP IP address string shown on the status screen in WiFi mode.
     void setWifiIP(const String& ip);
 
 private:
@@ -80,17 +51,10 @@ private:
 
     String lastProfile_;
 
-    // Progress bar redraw cache.
-    //
-    // Button::onHold fires on every loop() iteration, so the bar screens were
-    // pushing a full 128x32 frame over I2C hundreds of times per second to draw
-    // a bar that only has 5 (or 15) distinct states. These track what is
-    // currently on screen so a redraw is skipped unless something visibly
-    // changed. Cleared by every non-bar screen via resetBarCache().
     enum class BarKind : uint8_t { None, Hold, Reset };
     BarKind barKind_    = BarKind::None;
     int16_t barFilled_  = -1;
-    bool    barFlag_    = false;  // Hold bar only: entering (true) vs exiting (false)
+    bool    barFlag_    = false;
 
     void resetBarCache();
     void drawStatus(const String& profileName);
