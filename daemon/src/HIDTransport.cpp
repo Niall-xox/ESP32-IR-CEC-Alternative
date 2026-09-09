@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstring>
 #include <cwchar>
-#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -12,19 +11,21 @@
 
 static constexpr size_t REPORT_SIZE = 64;
 
-static constexpr auto SEND_BUDGET = std::chrono::milliseconds(4000);
-
-static constexpr auto MAX_SEND_BUDGET = std::chrono::seconds(60);
-
-static constexpr auto ACK_TIMEOUT = std::chrono::milliseconds(2000);
-
-static constexpr auto STARTUP_OPEN_TIMEOUT = std::chrono::seconds(3);
+// One timeout covers a whole send: opening, any retried write, and the ACK.
+//
+// It is a single constant rather than a per-event budget because the only
+// number that ever mattered was "long enough for a device that is present to
+// answer". A healthy round trip is comfortably under 200ms, and every deadline
+// the OS imposes on us — logind's 5s inhibitor delay, the ~2s Windows allows
+// after announcing a suspend, the 60s preshutdown timeout the installer sets —
+// is longer than this. There is nothing left for the caller to tune.
+static constexpr auto SEND_TIMEOUT = std::chrono::milliseconds(2000);
 
 static constexpr auto OPEN_POLL = std::chrono::milliseconds(100);
 
 static constexpr int MAX_DRAIN_REPORTS = 64;
 
-static constexpr int MAX_WRITE_ATTEMPTS = 8;
+static constexpr int MAX_WRITE_ATTEMPTS = 4;
 
 static constexpr auto WRITE_RETRY_DELAY = std::chrono::milliseconds(150);
 
@@ -45,7 +46,7 @@ HIDTransport::HIDTransport(uint16_t vid, uint16_t pid) : vid_(vid), pid_(pid) {
         throw std::runtime_error("hid_init() failed — no usable HID backend");
     }
 
-    if (!ensureOpen(Clock::now() + STARTUP_OPEN_TIMEOUT)) {
+    if (!ensureOpen()) {
         std::cout << "[transport] ESP32 not found at startup — will retry when needed\n";
     }
 }
@@ -121,55 +122,30 @@ hid_device* HIDTransport::openMatching() {
     return opened;
 }
 
-void HIDTransport::logReportDescriptor() {
-#if defined(HID_API_VERSION_MAJOR) && \
-    (HID_API_VERSION_MAJOR > 0 || HID_API_VERSION_MINOR >= 14)
-    unsigned char desc[256];
-    const int n = hid_get_report_descriptor(dev_, desc, sizeof(desc));
-    if (n < 0) {
-        std::cerr << "[transport] Could not read the report descriptor ("
-                  << narrow(hid_error(dev_)) << ")\n";
-        return;
-    }
 
-    std::cerr << "[transport] Report descriptor as the host parsed it (" << n
-              << " bytes, firmware publishes 34):";
-    for (int i = 0; i < n; ++i) {
-        std::cerr << " " << std::hex << std::setw(2) << std::setfill('0')
-                  << static_cast<unsigned>(desc[i]);
-    }
-    std::cerr << std::dec << std::setfill(' ') << "\n";
-
-    bool hasOutput = false;
-    for (int i = 0; i + 1 < n; ++i) {
-        if (desc[i] == 0x91) { hasOutput = true; break; }
-    }
-    if (!hasOutput) {
-        std::cerr << "[transport] No Output item (0x91) in that descriptor — the host"
-                     " believes this device cannot be written to. Re-enumerate the"
-                     " device (unplug and replug) and check the firmware starts HID"
-                     " before USB.\n";
-    }
-#else
-    std::cerr << "[transport] hidapi is older than 0.14 — cannot report the"
-                 " descriptor the host parsed\n";
-#endif
-}
-
-bool HIDTransport::ensureOpen(TimePoint deadline) {
+// One attempt, no waiting. If nothing enumerates there is nothing to wait for,
+// and waiting is exactly what would delay a sleep or shutdown on a machine
+// where the stick simply is not plugged in.
+bool HIDTransport::ensureOpen() {
     if (dev_) return true;
 
-    while (true) {
-        dev_ = openMatching();
-        if (dev_) {
-            std::cout << "[transport] HID device opened (VID="
-                      << std::hex << vid_ << " PID=" << pid_ << std::dec << ")\n";
-            return true;
-        }
+    dev_ = openMatching();
+    if (!dev_) return false;
 
+    std::cout << "[transport] HID device opened (VID="
+              << std::hex << vid_ << " PID=" << pid_ << std::dec << ")\n";
+    return true;
+}
+
+// Waiting *is* worth it here, because this is only called after a handle we
+// already had stopped working: the device demonstrably exists, so the most
+// likely explanation is that it is re-enumerating and will be back shortly.
+bool HIDTransport::reopenBefore(TimePoint deadline) {
+    while (!ensureOpen()) {
         if (Clock::now() + OPEN_POLL >= deadline) return false;
         std::this_thread::sleep_for(OPEN_POLL);
     }
+    return true;
 }
 
 void HIDTransport::drainInput() {
@@ -187,18 +163,12 @@ uint8_t HIDTransport::nextSequence() {
     return seq_;
 }
 
-bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget) {
+bool HIDTransport::send(const std::string& cmd) {
 
-    const auto effective = (budget <= std::chrono::milliseconds::zero())
-                               ? SEND_BUDGET
-                               : std::min(budget,
-                                          std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              MAX_SEND_BUDGET));
+    const TimePoint deadline = Clock::now() + SEND_TIMEOUT;
 
-    const TimePoint deadline = Clock::now() + effective;
-
-    if (!ensureOpen(deadline)) {
-        std::cerr << "[transport] ESP32 not found — skipping IR command: " << cmd << "\n";
+    if (!ensureOpen()) {
+        std::cerr << "[transport] ESP32 not connected — skipping IR command: " << cmd << "\n";
         return false;
     }
 
@@ -224,16 +194,14 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
         std::cerr << "[transport] Write failed on attempt " << attempt << " ("
                   << narrow(hid_error(dev_)) << ")\n";
 
-        if (attempt == 1) logReportDescriptor();
-
         closeDevice();
         if (Clock::now() + WRITE_RETRY_DELAY >= deadline) break;
         std::this_thread::sleep_for(WRITE_RETRY_DELAY);
-        if (!ensureOpen(deadline)) break;
+        if (!reopenBefore(deadline)) break;
     }
 
     if (!written) {
-        std::cerr << "[transport] Giving up on command within budget: " << cmd << "\n";
+        std::cerr << "[transport] Giving up on command: " << cmd << "\n";
         closeDevice();
         return false;
     }
@@ -243,11 +211,9 @@ bool HIDTransport::send(const std::string& cmd, std::chrono::milliseconds budget
 
 bool HIDTransport::awaitAck(uint8_t seq, const std::string& cmd, TimePoint deadline) {
 
-    const TimePoint ackDeadline = std::min(deadline, Clock::now() + ACK_TIMEOUT);
-
     while (true) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            ackDeadline - Clock::now());
+            deadline - Clock::now());
         if (remaining.count() <= 0) break;
 
         uint8_t rxBuf[REPORT_SIZE] = {0};

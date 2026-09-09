@@ -1,11 +1,11 @@
 # Captures what a Windows machine is and what the daemon is doing on it.
 #
-# The Windows work has to be proven on three configurations — classic S3,
-# hibernate, and Modern Standby — and a machine can only ever be one of them,
-# because the sleep model is a property of the platform firmware. So the
-# evidence arrives from different machines on different days, and the thing that
-# makes it add up to a verification record rather than three anecdotes is that
-# each machine reports itself the same way.
+# The daemon behaves the same way on every machine — the TV follows the console
+# display state — but a machine's sleep model still decides which events appear
+# in the log, and it is a property of the platform firmware that cannot be
+# changed. So evidence arrives from different machines on different days, and
+# what makes it add up to a verification record rather than a pile of anecdotes
+# is that each machine reports itself the same way.
 #
 # That is all this does: read the state, write it down in a fixed order, and
 # save it next to the log. It changes nothing.
@@ -61,11 +61,12 @@ Say ("Windows    : " + (Get-CimInstance Win32_OperatingSystem).Caption +
      " build " + [System.Environment]::OSVersion.Version.Build)
 Say ""
 
-# --- 1. Which of the three configurations is this ---------------------------
+# --- 1. What kind of machine is this ----------------------------------------
 #
-# The single most important thing in the report. Everything below is read
-# against it: an absent PBT_APMSUSPEND is a defect on an S3 desktop and the
-# documented behaviour on a Modern Standby laptop.
+# The daemon no longer branches on the sleep model — the TV follows the display
+# state on every machine — but the model still explains which events to expect
+# in the log: an absent PBT_APMSUSPEND is normal on a Modern Standby laptop and
+# a defect on an S3 desktop.
 Say "== Power model =="
 Say ""
 Say "powercfg /a:"
@@ -187,11 +188,8 @@ Say ""
 Say "== Manual checks — record the result against this machine =="
 Say ""
 Say "  [ ] Boot            TV comes on, log shows 'display state = on' at registration"
-Say "  [ ] Display timeout Depends on the machine, and the log's 'display-off policy'"
-Say "                      line says which to expect. On Modern Standby the TV goes"
-Say "                      off when the screen blanks; on an S3 machine the blank is"
-Say "                      ignored and only the suspend turns the TV off."
-Say "  [ ] Sleep           TV off; log shows the suspend send and how much budget it used"
+Say "  [ ] Display timeout TV off when the screen blanks — on every machine"
+Say "  [ ] Sleep           TV off; log shows the suspend send and how long it took"
 Say "  [ ] Wake            TV on; check whether the ESP32 re-enumerated (arrival line)"
 Say "  [ ] Hibernate       as sleep, but 'away for' should show the real elapsed time"
 Say "  [ ] Resume from hib TV on, and the device arrival re-assert lands"

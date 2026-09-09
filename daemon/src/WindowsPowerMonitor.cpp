@@ -95,10 +95,6 @@ void WindowsPowerMonitor::setOnDeviceChange(std::function<void(bool)> cb) {
     onDeviceChange_ = std::move(cb);
 }
 
-std::chrono::milliseconds WindowsPowerMonitor::budgetFor(Trigger why) {
-    return why == Trigger::Suspend ? SLEEP_BUDGET : std::chrono::milliseconds::zero();
-}
-
 const char* WindowsPowerMonitor::reasonFor(Trigger why, bool on) {
     switch (why) {
     case Trigger::Suspend:       return "sleep";
@@ -107,10 +103,6 @@ const char* WindowsPowerMonitor::reasonFor(Trigger why, bool on) {
     case Trigger::DisplayState:
     default:                     return on ? "display on" : "display off";
     }
-}
-
-bool WindowsPowerMonitor::displayOffDrivesOff() const {
-    return !(caps_.queried && caps_.s3 && !caps_.modernStandby);
 }
 
 void WindowsPowerMonitor::run() {
@@ -163,15 +155,9 @@ void WindowsPowerMonitor::serviceMain(DWORD , LPWSTR* ) {
     }
     reportStatus(SERVICE_RUNNING);
 
-    caps_ = queryPowerCapabilities();
-    plog("machine power model: " + caps_.summary());
-    for (const auto& line : caps_.details()) plog(line);
-    plog(displayOffDrivesOff()
-             ? "  display-off policy: an idle screen blank turns the TV off "
-               "(no usable suspend event on this machine)"
-             : "  display-off policy: an idle screen blank is ignored — "
-               "PBT_APMSUSPEND drives the OFF on this machine");
-
+    // The console display state is the primary signal: the TV mirrors whatever
+    // the PC's own screen is doing. Suspend and resume are kept as a second
+    // trigger underneath it, not as a separate policy.
     displayNotify_ = RegisterPowerSettingNotification(
         reinterpret_cast<HANDLE>(statusHandle_), &CONSOLE_DISPLAY_STATE,
         DEVICE_NOTIFY_SERVICE_HANDLE);
@@ -179,8 +165,8 @@ void WindowsPowerMonitor::serviceMain(DWORD , LPWSTR* ) {
     if (!displayNotify_) {
 
         std::cerr << "[monitor] RegisterPowerSettingNotification failed: " << GetLastError()
-                  << " — falling back to suspend/resume events only. Modern Standby\n"
-                     "[monitor] machines and the ON at boot will not work in this mode.\n";
+                  << " — falling back to suspend/resume events only. An idle screen\n"
+                     "[monitor] blank and the ON at boot will not be seen in this mode.\n";
     }
 
     {
@@ -312,7 +298,6 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
             logAwayTime();
             if (lastDisplayState_.has_value() && !*lastDisplayState_) {
                 plog("PBT_APMRESUMESUSPEND while display is known off — not asserting on");
-                bumpGeneration();
                 return NO_ERROR;
             }
             plog("PBT_APMRESUMESUSPEND (user-initiated resume)");
@@ -321,14 +306,12 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
 
         case PBT_APMRESUMEAUTOMATIC:
 
-            bumpGeneration();
             logAwayTime();
             plog("PBT_APMRESUMEAUTOMATIC (resume, presence unknown) — not acted on");
             return NO_ERROR;
 
         case PBT_APMRESUMECRITICAL:
 
-            bumpGeneration();
             logAwayTime();
             plog("PBT_APMRESUMECRITICAL (resume after unannounced power loss) — not acted on");
             return NO_ERROR;
@@ -348,16 +331,13 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
 
             switch (state) {
             case DISPLAY_OFF:
+
+                // Unconditional. Windows has already blanked every display,
+                // the TV among them, so there is no screen left to black out
+                // by acting on this — only one left showing black.
                 plog("display state = off");
                 lastDisplayState_ = false;
-
-                if (displayOffDrivesOff()) {
-                    requestState(false, Trigger::DisplayState);
-                } else {
-                    plog("  ignored — this machine has S3, so the suspend "
-                         "event drives the OFF");
-                    bumpGeneration();
-                }
+                requestState(false, Trigger::DisplayState);
                 break;
             case DISPLAY_ON:
 
@@ -390,10 +370,6 @@ DWORD WindowsPowerMonitor::serviceCtrlHandler(DWORD control, DWORD eventType, LP
     }
 }
 
-void WindowsPowerMonitor::bumpGeneration() {
-    std::lock_guard<std::mutex> lock(queueMutex_);
-    generation_.fetch_add(1, std::memory_order_relaxed);
-}
 
 void WindowsPowerMonitor::requestState(bool on, Trigger why) {
 
@@ -401,10 +377,6 @@ void WindowsPowerMonitor::requestState(bool on, Trigger why) {
 
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-
-        if (why != Trigger::DeviceArrival) {
-            generation_.fetch_add(1, std::memory_order_relaxed);
-        }
 
         pendingOn_  = on;
         pendingWhy_ = why;
@@ -419,7 +391,6 @@ void WindowsPowerMonitor::requestState(bool on, Trigger why) {
 void WindowsPowerMonitor::requestShutdown() {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        generation_.fetch_add(1, std::memory_order_relaxed);
         shutdownRequested_ = true;
     }
     queueCv_.notify_all();
@@ -446,8 +417,8 @@ void WindowsPowerMonitor::workerLoop() {
             plog("no display state reported at registration — opening state "
                  "UNKNOWN, asserting nothing");
             plog("  the TV will be driven from the first display-state change");
-            plog("  if this line appears on a normal boot, the boot ON needs "
-                 "rethinking — see the brief");
+            plog("  on a normal boot Windows reports the state immediately, so "
+                 "this line means the ON at boot did not happen");
         }
     }
 
@@ -457,7 +428,6 @@ void WindowsPowerMonitor::workerLoop() {
         bool     doShutdown   = false;
         bool     doStop       = false;
         bool     doInvalidate = false;
-        uint64_t gen          = 0;
         std::optional<std::chrono::steady_clock::time_point> suspendAt;
 
         {
@@ -474,16 +444,12 @@ void WindowsPowerMonitor::workerLoop() {
             doInvalidate = deviceGone_;
             deviceGone_  = false;
             suspendAt    = suspendAnnouncedAt_;
-
-            gen = generation_.load(std::memory_order_relaxed);
         }
 
         if (doInvalidate) {
             if (onDeviceChange_) {
                 try { onDeviceChange_(false); } catch (...) {}
             }
-
-            lastAsserted_.reset();
         }
 
         if (doShutdown) {
@@ -492,7 +458,7 @@ void WindowsPowerMonitor::workerLoop() {
             reportPending();
             if (onCommand_) {
                 try {
-                    (void)onCommand_(TvCommand{false, "shutdown", SHUTDOWN_BUDGET});
+                    (void)onCommand_(TvCommand{false, "shutdown"});
                 } catch (...) {}
             }
             reportPending();
@@ -502,56 +468,34 @@ void WindowsPowerMonitor::workerLoop() {
         if (want.has_value()) {
             const bool on = *want;
 
-            const bool redundant = lastAsserted_.has_value() && *lastAsserted_ == on;
-            if (redundant && why == Trigger::Suspend) {
-                plog(std::string("TV already ") + (on ? "on" : "off")
-                     + " — no command sent (inside the suspend grace period)");
-            } else {
+            switch (why) {
+            case Trigger::DisplayState:
+                std::cout << (on ? "[event] Display on\n" : "[event] Display off\n");
+                break;
+            case Trigger::Suspend:
+                std::cout << "[event] Going to sleep\n";
+                break;
+            case Trigger::Resume:
+                std::cout << "[event] Woke up\n";
+                break;
+            case Trigger::DeviceArrival:
+                std::cout << (on ? "[event] ESP32 reconnected — re-asserting on\n"
+                                 : "[event] ESP32 reconnected — re-asserting off\n");
+                break;
+            }
+            reportPending();
 
-                switch (why) {
-                case Trigger::DisplayState:
-                    std::cout << (on ? "[event] Display on\n" : "[event] Display off\n");
-                    break;
-                case Trigger::Suspend:
-                    std::cout << "[event] Going to sleep\n";
-                    break;
-                case Trigger::Resume:
-                    std::cout << "[event] Woke up\n";
-                    break;
-                case Trigger::DeviceArrival:
-                    std::cout << (on ? "[event] ESP32 reconnected — re-asserting on\n"
-                                     : "[event] ESP32 reconnected — re-asserting off\n");
-                    break;
+            if (onCommand_) {
+                try {
+                    (void)onCommand_(TvCommand{on, reasonFor(why, on)});
+                } catch (...) {
                 }
-                reportPending();
+            }
 
-                bool confirmed = false;
-                if (onCommand_) {
-                    try {
-                        confirmed = onCommand_(
-                            TvCommand{on, reasonFor(why, on), budgetFor(why)});
-                    } catch (...) {
-                        confirmed = false;
-                    }
-                }
-
-                if (why == Trigger::Suspend && suspendAt.has_value()) {
-                    const auto used = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - *suspendAt);
-                    plog("suspend send took " + std::to_string(used.count()) + "ms of the "
-                         + std::to_string(SLEEP_BUDGET.count()) + "ms budget");
-                }
-
-                if (generation_.load(std::memory_order_relaxed) != gen) {
-
-                    plog("power state changed mid-command — result discarded as stale");
-                    lastAsserted_.reset();
-                } else if (confirmed) {
-                    lastAsserted_ = on;
-                } else {
-
-                    lastAsserted_.reset();
-                }
+            if (why == Trigger::Suspend && suspendAt.has_value()) {
+                const auto used = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - *suspendAt);
+                plog("suspend send took " + std::to_string(used.count()) + "ms");
             }
         }
 

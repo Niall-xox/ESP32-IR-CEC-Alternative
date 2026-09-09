@@ -8,8 +8,7 @@ public:
     explicit SerialTransport(const std::string& port);
     ~SerialTransport() override;
 
-    bool send(const std::string& cmd,
-              std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
+    bool send(const std::string& cmd) override;
 
 private:
 

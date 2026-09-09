@@ -150,7 +150,7 @@ int main() {
 
     monitor->setOnCommand([&](const TvCommand& c) {
         const char* cmd = c.on ? "ON" : "OFF";
-        return report(cmd, c.reason, transport->send(cmd, c.budget));
+        return report(cmd, c.reason, transport->send(cmd));
     });
 
     monitor->setOnDeviceChange([&](bool present) {

@@ -39,7 +39,7 @@ void LinuxPowerMonitor::setOnCommand(std::function<bool(const TvCommand&)> cb) {
 void LinuxPowerMonitor::assertTv(bool on, const char* reason) {
     if (!onCommand_) return;
     try {
-        (void)onCommand_(TvCommand{on, reason, std::chrono::milliseconds::zero()});
+        (void)onCommand_(TvCommand{on, reason});
     } catch (...) {
 
     }

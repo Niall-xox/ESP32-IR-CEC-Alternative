@@ -11,8 +11,7 @@ public:
     HIDTransport(uint16_t vid, uint16_t pid);
     ~HIDTransport() override;
 
-    bool send(const std::string& cmd,
-              std::chrono::milliseconds budget = std::chrono::milliseconds::zero()) override;
+    bool send(const std::string& cmd) override;
 
     void invalidate() override;
 
@@ -20,11 +19,11 @@ private:
     using Clock     = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
-    bool ensureOpen(TimePoint deadline);
+    bool ensureOpen();
+
+    bool reopenBefore(TimePoint deadline);
 
     hid_device* openMatching();
-
-    void logReportDescriptor();
 
     void closeDevice();
 

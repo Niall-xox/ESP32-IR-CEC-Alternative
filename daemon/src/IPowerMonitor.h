@@ -1,5 +1,4 @@
 #pragma once
-#include <chrono>
 #include <functional>
 
 struct TvCommand {
@@ -7,8 +6,6 @@ struct TvCommand {
     bool on;
 
     const char* reason;
-
-    std::chrono::milliseconds budget;
 };
 
 class IPowerMonitor {

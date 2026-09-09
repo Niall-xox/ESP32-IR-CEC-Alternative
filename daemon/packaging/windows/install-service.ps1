@@ -223,12 +223,10 @@ sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/rest
 # documented API is ChangeServiceConfig2 with SERVICE_CONFIG_PRESHUTDOWN_INFO,
 # and this registry value is what that writes.
 #
-# 60s is comfortably more than the shutdown send can take — the daemon caps that
-# at 20s, deliberately below this — and far less than the 3-minute default, which
-# would hold up a shutdown that long if the daemon ever hung. Being explicit is
-# the point: the timeout is now a decision rather than whatever the OS defaults
-# to this year. Change it and SHUTDOWN_BUDGET in WindowsPowerMonitor.h has to
-# move with it; that is why the daemon's number is the smaller of the two.
+# 60s is comfortably more than the shutdown send can take — the daemon gives up
+# after 2s — and far less than the 3-minute default, which would hold up a
+# shutdown that long if the daemon ever hung. Being explicit is the point: the
+# timeout is now a decision rather than whatever the OS defaults to this year.
 $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 New-ItemProperty -Path $key -Name "PreshutdownTimeout" `
                  -Value 60000 -PropertyType DWord -Force | Out-Null
