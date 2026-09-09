@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include "USB.h"
 #include "USBHID.h"
+#include "esp_task_wdt.h"
 
 #include "tusb.h"
 #include "Profiles.h"
@@ -31,6 +32,23 @@
 
 #define WIFI_SSID  "ESP32-IR-Remote"
 #define WIFI_PASS  "irremote123"
+
+// Hardware watchdog. Reboots the device if loop() ever stops running.
+//
+// This is the one failure the device has no other defence against: nothing on
+// the PC side can tell a hung stick from an unplugged one, so a hang would
+// persist until somebody noticed the TV had stopped following the PC. A reset
+// is a clean recovery — profiles live in flash and the daemon reopens the
+// device on its next send.
+//
+// 20s is sized by the web server, not by anything in our own code. Serving the
+// config page can legitimately block for around 12s inside a single loop()
+// iteration if a client stalls: WebServer waits up to 5s for the request, 5s
+// for data to be ACKed and 2s for the close. Everything else in loop() —
+// button, display, IR, HID — is under 200ms. The margin matters more than fast
+// detection here, because a false reset while somebody is saving IR codes over
+// the web UI would be worse than a slow one.
+#define WDT_TIMEOUT_SECONDS 20
 
 static const uint8_t REPORT_DESCRIPTOR[] = {
     0x06, 0x00, 0xFF,
@@ -315,12 +333,12 @@ void onButtonHold(uint32_t heldMs) {
 
     pressCount = 0;
 
-    if (heldMs >= 23000) {
+    if (heldMs >= HoldTimings::RESET_END_MS) {
 
         return;
-    } else if (heldMs >= 8000) {
+    } else if (heldMs >= HoldTimings::RESET_START_MS) {
         display.showResetBar(heldMs);
-    } else if (heldMs >= 5000) {
+    } else if (heldMs >= HoldTimings::CONFIG_MS) {
         display.showConfigRelease(!wifiActive);
     } else {
         display.showHoldBar(heldMs, !wifiActive);
@@ -389,9 +407,19 @@ void setup() {
 
     USB.begin();
     HID.begin();
+
+    // Started last, so setup() itself is never watched. A hang before this
+    // point is a bricked-at-boot device, which you find the moment you flash
+    // it; the watchdog is here for the silent hang months later. It also keeps
+    // first-boot LittleFS formatting from having to fit inside the timeout.
+    esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
+    esp_task_wdt_add(NULL);
+    Serial.printf("[wdt] Watchdog armed (%ds)\n", WDT_TIMEOUT_SECONDS);
 }
 
 void loop() {
+    esp_task_wdt_reset();
+
     button.update();
     display.update();
 
