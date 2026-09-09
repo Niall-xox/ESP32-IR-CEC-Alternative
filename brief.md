@@ -573,12 +573,13 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 ### Needs re-testing after the 2026-09-09 changes
 
+All remaining items need the Windows machine; Linux is done.
+
 1. **Windows, S3 machine**: an idle screen blank should now turn the TV off. It
-   previously did not.
-2. **Both platforms, normal sleep/wake**: confirm the single 2 s timeout is
-   still comfortably enough.
-3. **Windows, stick unplugged**: shutdown should be instant, where it was
+   previously did not. The biggest behaviour change of the lot.
+2. **Windows, stick unplugged**: shutdown should be instant, where it was
    previously delayed by up to 20 s.
+3. **Windows, normal sleep/wake**: confirm the single 2 s timeout is enough.
 
 **Confirmed 2026-09-09 — Linux, stick unplugged.** Sleep is visibly faster with
 no stick connected, which is the transport's fail-fast open doing its job. The
@@ -595,10 +596,15 @@ Four seconds between finding no device and giving up — the old send budget
 polling for something that was never going to appear. That delay landed on every
 sleep and every shutdown.
 
+**Also confirmed 2026-09-09 on Linux**, after the full re-flash: sleep and wake
+with the stick connected under the single 2 s timeout; profile cycling across
+the four-profile default; and factory reset and profile deletion through the web
+UI, which had never been exercised before.
+
 ### Not verified
 
-- Boot with "display always on" enabled.
-- Factory reset and profile deletion through the web UI.
+- Boot with "display always on" enabled — the status screen should be up from
+  boot rather than after the first button press.
 - Recovery from a corrupt `profiles.json` — the code path exists, but testing it
   means flashing a deliberately broken filesystem image. Judged not worth it.
 
