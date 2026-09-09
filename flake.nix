@@ -83,6 +83,7 @@
           meta = with pkgs.lib; {
             description = "Mirrors PC power state to a TV over IR, as a CEC alternative";
             homepage = "https://github.com/Niall-xox/ESP32-IR-CEC-Alternative";
+            license = licenses.gpl3Plus;
             platforms = platforms.linux;
             mainProgram = "esp32-ir-daemon";
           };

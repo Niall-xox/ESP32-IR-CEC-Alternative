@@ -24,7 +24,7 @@ pkgrel=1
 pkgdesc="Mirrors PC power state to a TV over IR, as a CEC alternative"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Niall-xox/ESP32-IR-CEC-Alternative"
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=('sdbus-cpp>=2.0' 'hidapi' 'systemd-libs')
 makedepends=('cmake' 'pkgconf' 'git')
 install="${pkgname}.install"

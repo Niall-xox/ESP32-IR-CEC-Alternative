@@ -567,12 +567,21 @@ pio run -t uploadfs    # the web UI into LittleFS — needed once
 
 **Daemon, Linux:**
 ```
-cmake -B daemon/build -S daemon && cmake --build daemon/build
+cmake -B daemon/build -S daemon -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build daemon/build
 sudo cmake --install daemon/build
 ```
 Needs `sdbus-c++` **2.x** (1.x will not compile) and `hidapi`. Then create the
-`esp32ir` user and group, install the udev rule, and enable the service — the
-packages in `daemon/packaging/` do all of that for you.
+`esp32ir` user and group, reload udev, and enable the service — the packages in
+`daemon/packaging/` do all of that for you.
+
+The prefix matters and is easy to get wrong. `install()` uses relative
+destinations (`lib/udev/rules.d`, `lib/systemd/system`), so the default
+`/usr/local` prefix lands them in `/usr/local/lib/...` — which **neither udev
+nor systemd reads**. The install reports success, then the daemon cannot open
+the device and `systemctl enable` cannot find the unit. The relative paths are
+themselves deliberate, because CPack rebases them when staging a package; the
+cost is that a hand install has to name the prefix.
 
 **Packaged:** `.deb` and `.rpm` are built by GitHub Actions on a `v*` tag;
 Arch builds from `daemon/packaging/PKGBUILD`; NixOS has a flake and a module
@@ -651,8 +660,9 @@ UI, which had never been exercised before.
 | Gap | Severity |
 |---|---|
 | **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
-| **No README, no LICENSE.** Both the Arch and RPM packages declare MIT while no licence text exists in the repo. | High |
+| **The README makes claims that will age.** Its Status table says Windows is less tested and that only LG is hardware-verified. Both are true now; both need revisiting when they stop being true. | Low |
 | **No release guard.** Any `v*` tag publishes a public Release with the packages attached. Nothing checks first that a real product ID is in place, or that a LICENSE exists. One mistyped `git push --tags` publishes. | Medium |
+| **A hand install with the default prefix silently half-works.** `cmake --install` without `-DCMAKE_INSTALL_PREFIX=/usr` puts the udev rule and unit under `/usr/local/lib/`, which nothing reads. Documented in §7, but a `message(WARNING)` in `CMakeLists.txt` when the prefix is not `/usr` would catch it at the point of the mistake. | Medium |
 | **No profile for TCL or Hisense** — no usable discrete codes appear to exist for either brand. Not fixable from a database; it needs somebody with the TV in front of them. Those users add a profile by hand. See §4. | Low |
 | **Samsung, Sony and Toshiba codes are unverified on hardware.** Derived from corroborated sources and cross-checked against the encoder, but nobody has pointed the stick at one of those TVs. | Medium |
 | **Linux does not watch display state.** Your screen blanks, the TV stays on. Now that the whole project is framed as mirroring the display, this is a real inconsistency rather than a design choice. | Medium |
@@ -683,11 +693,11 @@ the tag is the act of publishing, not a bookmark. Everything is staged at
 Tag before those and the release goes out unlicensed, on a shared test PID.
 There is currently **no guard** stopping that — see §8.
 
-1. **Write the README and add a LICENSE.** For the stated audience — hobbyists
-   who want this to work — this is the actual blocker, more than any code issue.
-   The README needs: what it is, what hardware, how to flash, how to install per
-   OS, and *where to find discrete IR codes* (the LIRC and irdb databases are
-   the standard answer).
+1. ~~Write the README and add a LICENSE.~~ **Done 2026-09-09.** GPL-3.0-or-later,
+   with `README.md` written for somebody building one from scratch — BOM,
+   wiring, flashing, per-OS install, the button and web UI, and where to find IR
+   codes. Worth re-reading once the Windows re-tests are done, since its Status
+   table makes claims that will change.
 
 2. **Verify the new codes on real TVs** if any are within reach — Samsung, Sony
    and Toshiba are all derived rather than tested. A Samsung is the one most
@@ -778,6 +788,12 @@ Net: 281 lines removed.
   serial transport had already cost real maintenance, needing a hand-patch when
   `ITransport` changed even though nothing compiles it. `VERSION` moved to the
   root.
+- **Licensed GPL-3.0-or-later**, with the canonical text in `LICENSE` and the
+  declarations in `PKGBUILD`, the RPM spec and `flake.nix` all switched from the
+  MIT they had been claiming over an empty repository. Every dependency is
+  compatible: the LGPL-2.1 libraries (IRremoteESP8266, sdbus-c++) may be used
+  under GPL by their own terms, and MIT and BSD are permissive.
+- **`README.md` written**, aimed at somebody building one from scratch.
 - **Version numbering reset to 1.0.0, and the old tags deleted.** `pkgver` was
   `0.3.0` while the only tags were `v1.0` and `v1.1` (both pointing at
   Phase-2-era commits), so `source=` fetched a `v0.3.0` that never existed and
