@@ -31,6 +31,26 @@ up a WiFi configuration page.
 
 Neither side knows anything about the other beyond those two words and a reply.
 
+### Where things live
+
+```
+README.md  LICENSE  VERSION  brief.md  flake.nix
+firmware/          the ESP32 side — src/, data/ (the web UI), platformio.ini
+daemon/            the PC side — src/, packaging/, CMakeLists.txt
+hardware/          FreeCAD enclosure and supplier part models
+tools/hid-test/    a minimal HID echo, for when a board will not talk at all
+.github/workflows/ builds both halves on every push; packages on a v* tag
+```
+
+`VERSION` sits at the root rather than under `daemon/` because the two halves
+share a wire protocol and must ship together — there is one version and it
+belongs to the device. `CMakeLists.txt`, `flake.nix` and `PKGBUILD` all read it
+from there.
+
+No path in the repository contains a space, which is deliberate: every script,
+CMake path and CI step would otherwise need quoting, and the one that gets
+forgotten fails in a way that is tedious to trace.
+
 ### The one idea the whole project rests on
 
 **The TV mirrors what the PC's own screen is doing.**
@@ -51,8 +71,8 @@ Windows. That is why the project moved from serial to HID.
 The cost is that the ESP32 has to have native USB hardware. The ESP32-S3 does,
 and so does the S2. The ESP32-C3 does **not** (its USB controller only does
 serial/JTAG, not arbitrary HID), and neither do the classic ESP32 or the
-ESP8266. An earlier serial version sits unbuilt at
-`daemon/archive/SerialTransport.*` — see §11.
+ESP8266. A serial version existed once and was removed; git history has it if
+it is ever wanted again — see §11.
 
 ---
 
@@ -65,7 +85,7 @@ ESP8266. An earlier serial version sits unbuilt at
 | SSD1306 OLED, 128×32, I²C | SDA GPIO 2, SCL GPIO 3, address 0x3C. |
 | Push button | GPIO 5, to ground (uses the internal pull-up). |
 
-CAD for the enclosure is in `3D modeling/`. The `.FCStd` is the editable master;
+CAD for the enclosure is in `hardware/`. The `.FCStd` is the editable master;
 `.stl` exports are deliberately not tracked in git.
 
 ### The USB identity, and why it is `1209:0001`
@@ -716,6 +736,17 @@ Net: 281 lines removed.
   reset at 16 s (was 23). The release window between them stays 3 s. Both
   progress bars derive their span from these constants, so they rescale on
   their own.
+- **Repository tidied.** `3D modeling/` → `hardware/`, `HID test/` →
+  `tools/hid-test/`, and no path anywhere contains a space now. `DEPRECATED/`
+  and `daemon/archive/` are deleted — both are in git history, and the archived
+  serial transport had already cost real maintenance, needing a hand-patch when
+  `ITransport` changed even though nothing compiles it. `VERSION` moved to the
+  root.
+- **The Arch package is no longer broken.** `pkgver` was `0.3.0` while the
+  newest tag was `v1.1`, so `source=` fetched a `v0.3.0` that never existed and
+  `makepkg` failed on the fetch. `VERSION` and `pkgver` are both **1.2.0**,
+  continuing from the published tags rather than moving backwards — **a matching
+  `v1.2.0` tag has to exist before the Arch package will build.**
 - **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
   and a TV is the 12-bit form, so the Sony profile could never have worked at
   20 bits regardless of the codes.
@@ -729,10 +760,12 @@ Net: 281 lines removed.
 
 ## 11. Still open
 
+Deferred by decision, not forgotten. None of these block a release.
+
 - **A second serial transport**, for ESP32 boards without native USB.
-  `ITransport` is exactly the right seam and the archived implementation is a
-  usable starting point, but the serial I/O is not the work: **finding the
-  device is.** A board without native USB is seen through a CP2102 or CH340
+  `ITransport` is exactly the right seam, and the old implementation is in git
+  history (removed 2026-09-09) as a starting point. But the serial I/O is not
+  the work: **finding the device is.** A board without native USB is seen through a CP2102 or CH340
   bridge whose VID/PID (`10c4:ea60`, `1a86:7523`) is shared with thousands of
   unrelated devices, so there is nothing to match on. It needs either a config
   file naming the port or an identify-handshake across candidate ports, plus a
@@ -741,3 +774,11 @@ Net: 281 lines removed.
 
 - **Whether the Windows service should stop retrying eventually**, rather than
   restarting forever. Currently `restart/5000` three times with a daily reset.
+
+- **Panasonic support** — a major brand in the UK with published discrete codes,
+  but Panasonic is a 48-bit protocol and `Profile.onCode` is `uint32_t`, so it
+  needs the code fields widened as well as a new protocol. Explicitly dropped
+  for now.
+
+- **Display-state watching on Linux** — the last real feature gap. Deferred, not
+  rejected; see §8.

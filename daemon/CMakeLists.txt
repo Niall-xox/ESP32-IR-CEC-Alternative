@@ -4,7 +4,11 @@ cmake_minimum_required(VERSION 3.16)
 # the Nix package, and the release tag. It used to be spelled out separately in
 # each, which is a drift waiting to happen — a package claiming a version it
 # was not built from is a bug nobody notices until they are chasing one.
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" DAEMON_VERSION LIMIT_COUNT 1)
+#
+# It sits at the repository root rather than in daemon/, because the firmware
+# and the daemon share a wire protocol and have to ship in lockstep. There is
+# one version, and it belongs to the device rather than to either half.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" DAEMON_VERSION LIMIT_COUNT 1)
 
 project(esp32-ir-remote-daemon VERSION ${DAEMON_VERSION} LANGUAGES CXX)
 

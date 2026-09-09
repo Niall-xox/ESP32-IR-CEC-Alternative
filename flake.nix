@@ -52,11 +52,19 @@
 
         esp32-ir-daemon = pkgs.stdenv.mkDerivation {
           pname = "esp32-ir-daemon";
-          # Read from daemon/VERSION, the same file CMakeLists reads, so the Nix
+          # Read from VERSION, the same file CMakeLists reads, so the Nix
           # package cannot claim a version the build did not produce.
-          version = nixpkgs.lib.fileContents ./daemon/VERSION;
+          version = nixpkgs.lib.fileContents ./VERSION;
 
-          src = ./daemon;
+          # The build needs daemon/ plus the VERSION file above it, so the
+          # source cannot simply be ./daemon. Listing the two explicitly, rather
+          # than handing over the whole repository, keeps 13MB of CAD out of the
+          # store and stops an enclosure tweak from rebuilding the daemon.
+          src = nixpkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = nixpkgs.lib.fileset.unions [ ./daemon ./VERSION ];
+          };
+          sourceRoot = "source/daemon";
 
           nativeBuildInputs = with pkgs; [ cmake pkg-config ];
           buildInputs = with pkgs; [ hidapi sdbus-cpp_2 ];
