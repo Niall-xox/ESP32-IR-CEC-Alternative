@@ -634,6 +634,7 @@ UI, which had never been exercised before.
 |---|---|
 | **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
 | **No README, no LICENSE.** Both the Arch and RPM packages declare MIT while no licence text exists in the repo. | High |
+| **No release guard.** Any `v*` tag publishes a public Release with the packages attached. Nothing checks first that a real product ID is in place, or that a LICENSE exists. One mistyped `git push --tags` publishes. | Medium |
 | **No profile for TCL or Hisense** — no usable discrete codes appear to exist for either brand. Not fixable from a database; it needs somebody with the TV in front of them. Those users add a profile by hand. See §4. | Low |
 | **Samsung, Sony and Toshiba codes are unverified on hardware.** Derived from corroborated sources and cross-checked against the encoder, but nobody has pointed the stick at one of those TVs. | Medium |
 | **Linux does not watch display state.** Your screen blanks, the TV stays on. Now that the whole project is framed as mirroring the display, this is a real inconsistency rather than a design choice. | Medium |
@@ -648,6 +649,21 @@ UI, which had never been exercised before.
 ## 9. What to do next
 
 In the order that gets the project finished.
+
+**Tagging is the last step, not an early one.** There are no tags in the
+repository, and that is deliberate. `packages.yml` triggers on any `v*` tag and
+publishes a **public GitHub Release** with the `.deb` and `.rpm` attached — so
+the tag is the act of publishing, not a bookmark. Everything is staged at
+`1.0.0` and waiting:
+
+```
+1. LICENSE + README          (items 1 below)
+2. a real product ID          (item 3)
+3. git tag v1.0.0 && git push origin v1.0.0
+```
+
+Tag before those and the release goes out unlicensed, on a shared test PID.
+There is currently **no guard** stopping that — see §8.
 
 1. **Write the README and add a LICENSE.** For the stated audience — hobbyists
    who want this to work — this is the actual blocker, more than any code issue.
