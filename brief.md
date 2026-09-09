@@ -302,10 +302,10 @@ One button, four things, decided by how long you hold it:
 | Hold for | On release |
 |---|---|
 | under 0.3 s | **Press** — wake the screen; press again to cycle to the next visible profile |
-| 0.3 – 5 s | Nothing (you changed your mind — the screen shows a filling bar as a countdown) |
-| 5 – 8 s | **Toggle WiFi config mode** on or off |
-| 8 – 23 s | Nothing (again, a bar shows how far you are) |
-| held past 23 s | **Factory reset** — fires while still held, not on release |
+| 0.3 – 4 s | Nothing (you changed your mind — the screen shows a filling bar as a countdown) |
+| 4 – 7 s | **Toggle WiFi config mode** on or off |
+| 7 – 16 s | Nothing (again, a bar shows how far you are) |
+| held past 16 s | **Factory reset** — fires while still held, not on release |
 
 The press behaviour has one subtlety worth knowing: when the screen is off, the
 *first* press just wakes it and shows the current profile, and only the next
@@ -350,7 +350,7 @@ code, and — in WiFi mode — the AP's IP address.
 
 ### WiFi config mode
 
-Hold the button 5–8 seconds and the ESP32 starts its own WiFi access point:
+Hold the button 4–7 seconds and the ESP32 starts its own WiFi access point:
 
 - SSID `ESP32-IR-Remote`, password `irremote123`
 - Browse to the IP shown on the OLED
@@ -695,13 +695,17 @@ Net: 281 lines removed.
   and Sony filled in, Toshiba added, and TCL and Hisense **removed** rather than
   shipped blank — a default profile that cannot work looks like support the
   device does not have.
+- **Button hold timings shortened**: wireless config at 4 s (was 5), factory
+  reset at 16 s (was 23). The release window between them stays 3 s. Both
+  progress bars derive their span from these constants, so they rescale on
+  their own.
 - **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
   and a TV is the 12-bit form, so the Sony profile could never have worked at
   20 bits regardless of the codes.
 
   Note that **existing devices keep their old profiles**. `Profiles::begin()`
   only writes the defaults when `profiles.json` is absent, so a device that has
-  booted before needs a factory reset — hold the button past 23 s — to pick the
+  booted before needs a factory reset — hold the button past 16 s — to pick the
   new set up. Flashing alone is not enough.
 
 ---
