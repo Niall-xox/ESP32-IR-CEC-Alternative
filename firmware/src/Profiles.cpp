@@ -14,18 +14,17 @@ struct DefaultProfile {
 // the same encoder IRremoteESP8266 uses. Provenance and how to find more is in
 // the brief, §4 "Where IR codes come from".
 //
-// TCL and Hisense are deliberately left at 0x0. Neither publishes usable
-// discrete codes — TCL has only a toggle, in a protocol this firmware does not
-// speak, and Hisense is absent from irdb entirely. A toggle in both fields
-// would flip the TV on every command, which is worse than not transmitting:
-// isConfigured() reports these honestly and the OLED says "Not Configured".
+// Every profile here transmits. A brand only earns a place once a discrete
+// on/off pair exists that covers the line rather than one model — so TCL and
+// Hisense are absent, not blank: TCL publishes only a power toggle, in a
+// protocol this firmware does not speak, and Hisense is not in irdb at all.
+// Users of those TVs add a profile through the web UI, which is a better answer
+// than a factory default that cannot work.
 static const DefaultProfile DEFAULT_PROFILES[] = {
     { "LG",      "NEC",     0x20DF23DC, 0x20DFA35C, true },
     { "Samsung", "SAMSUNG", 0xE0E09966, 0xE0E019E6, true },
     { "Sony",    "SONY",    0x00000750, 0x00000F50, true },
     { "Toshiba", "NEC",     0x02FD7E81, 0x02FDFE01, true },
-    { "TCL",     "NEC",     0x00000000, 0x00000000, true },
-    { "Hisense", "NEC",     0x00000000, 0x00000000, true },
 };
 
 static const Settings DEFAULT_SETTINGS = {

@@ -171,7 +171,7 @@ A **profile** is one TV: a name, an IR protocol (NEC, Samsung or Sony), an ON
 code, an OFF code, and a "visible" flag that controls whether the button cycles
 through it.
 
-Six ship by default, four of them with working codes. Up to 32 profiles.
+Four ship by default, and **every one of them transmits**. Up to 32 profiles.
 
 | Profile | Protocol | ON | OFF |
 |---|---|---|---|
@@ -179,16 +179,21 @@ Six ship by default, four of them with working codes. Up to 32 profiles.
 | Samsung | SAMSUNG | `0xE0E09966` | `0xE0E019E6` |
 | Sony | SONY | `0x00000750` | `0x00000F50` |
 | Toshiba | NEC | `0x02FD7E81` | `0x02FDFE01` |
-| TCL | NEC | — | — |
-| Hisense | NEC | — | — |
 
-**TCL and Hisense are deliberately empty**, and should stay that way unless
-somebody produces tested codes. Neither publishes usable discrete codes: TCL has
-only a power *toggle*, in a protocol this firmware does not speak, and Hisense
-is not in irdb at all. Filling them with a toggle would be actively worse than
-leaving them blank — the same code in both fields flips the TV on every command,
-which is the drift discrete codes exist to prevent. Left at `0x0` the firmware
-answers `ERR` and shows *Not Configured*, which is honest.
+That is the rule for the factory default: a brand earns a place only once a
+discrete on/off pair exists that covers the product line rather than one model.
+A default profile that cannot work is worse than no profile, because it looks
+like the device supports your TV.
+
+**TCL and Hisense are therefore absent, not blank.** Neither publishes usable
+discrete codes: TCL has only a power *toggle*, in a protocol this firmware does
+not speak, and Hisense is not in irdb at all. Filling them with a toggle would
+be worse still — the same code in both fields flips the TV on every command,
+which is the drift discrete codes exist to prevent. Owners of those sets add a
+profile through the web UI instead.
+
+The *Not Configured* path still exists and still matters: it catches a
+user-added profile saved with one or both codes blank.
 
 That difference is structural, not bad luck. LG, Samsung, Sony and Toshiba
 design their own remotes across a whole product line, so one code set covers the
@@ -592,7 +597,7 @@ sleep and every shutdown.
 |---|---|
 | **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
 | **No README, no LICENSE.** Both the Arch and RPM packages declare MIT while no licence text exists in the repo. | High |
-| **TCL and Hisense profiles have no codes**, and no usable discrete codes appear to exist for either. Not fixable from a database — it needs somebody with the TV in front of them. See §4. | Low |
+| **No profile for TCL or Hisense** — no usable discrete codes appear to exist for either brand. Not fixable from a database; it needs somebody with the TV in front of them. Those users add a profile by hand. See §4. | Low |
 | **Samsung, Sony and Toshiba codes are unverified on hardware.** Derived from corroborated sources and cross-checked against the encoder, but nobody has pointed the stick at one of those TVs. | Medium |
 | **Linux does not watch display state.** Your screen blanks, the TV stays on. Now that the whole project is framed as mirroring the display, this is a real inconsistency rather than a design choice. | Medium |
 | **Windows service runs as LocalSystem.** Linux runs unprivileged; Windows should move to LocalService to match. | Medium |
@@ -686,9 +691,10 @@ Net: 281 lines removed.
 - **The USB identity moved from `1234:5678` to `1209:0001`** (§2) — a made-up
   pair replaced by pid.codes' open-hardware vendor ID and its test PID.
   **Requires a re-flash to take effect**, since the firmware announces it.
-- **Samsung, Sony and Toshiba default profiles filled in** (§4), taking the
-  working set from one to four. Toshiba is a new profile; TCL and Hisense stay
-  deliberately empty.
+- **The factory default is now four profiles that all transmit** (§4). Samsung
+  and Sony filled in, Toshiba added, and TCL and Hisense **removed** rather than
+  shipped blank — a default profile that cannot work looks like support the
+  device does not have.
 - **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
   and a TV is the 12-bit form, so the Sony profile could never have worked at
   20 bits regardless of the codes.
