@@ -742,11 +742,14 @@ Net: 281 lines removed.
   serial transport had already cost real maintenance, needing a hand-patch when
   `ITransport` changed even though nothing compiles it. `VERSION` moved to the
   root.
-- **The Arch package is no longer broken.** `pkgver` was `0.3.0` while the
-  newest tag was `v1.1`, so `source=` fetched a `v0.3.0` that never existed and
-  `makepkg` failed on the fetch. `VERSION` and `pkgver` are both **1.2.0**,
-  continuing from the published tags rather than moving backwards — **a matching
-  `v1.2.0` tag has to exist before the Arch package will build.**
+- **Version numbering reset to 1.0.0, and the old tags deleted.** `pkgver` was
+  `0.3.0` while the only tags were `v1.0` and `v1.1` (both pointing at
+  Phase-2-era commits), so `source=` fetched a `v0.3.0` that never existed and
+  `makepkg` failed outright. Since nobody else had access to the repository, the
+  two stale tags were deleted rather than worked around, and `VERSION` and
+  `pkgver` are both **1.0.0** — the honest number for the first version that
+  works end to end. **A matching `v1.0.0` tag has to exist before the Arch
+  package will build.**
 - **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
   and a TV is the 12-bit form, so the Sony profile could never have worked at
   20 bits regardless of the codes.

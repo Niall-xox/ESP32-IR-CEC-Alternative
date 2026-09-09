@@ -15,10 +15,11 @@ pkgname=esp32-ir-remote
 # literal here — it cannot read the version out of a source it has not fetched
 # yet — so this is the one place the number is repeated by hand.
 #
-# This was 0.3.0 while the newest tag was v1.1, so source= asked for a v0.3.0
-# that had never existed and makepkg failed on the fetch. Bumping one without
-# the other is the whole failure mode; change both together, then tag.
-pkgver=1.2.0
+# This once read 0.3.0 while the only tags were v1.0 and v1.1, so source= asked
+# for a v0.3.0 that had never existed and makepkg failed on the fetch. Bumping
+# one without the other is the whole failure mode: change both together, and
+# only then tag.
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Mirrors PC power state to a TV over IR, as a CEC alternative"
 arch=('x86_64' 'aarch64')
