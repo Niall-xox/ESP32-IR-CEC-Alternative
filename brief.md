@@ -90,22 +90,12 @@ CAD for the enclosure is in `hardware/`. The `.FCStd` is the editable master;
 
 ### The USB identity, and why it is `1209:0001`
 
-Every USB device announces a **vendor ID** and a **product ID**. Vendor IDs are
-issued by the USB-IF and cost real money, which is not worth spending on a
-project that may never leave one desk.
-
-`0x1209` is **pid.codes**, a vendor ID held in trust for open-source hardware
-and shared out free. `0x0001` under it is their designated **test PID**, meant
-for exactly this situation: a device under development that has not been
-allocated a product ID of its own yet.
-
-It replaced `1234:5678`, which was simply made up, and is better in three ways:
-
-- `1209` is a real allocation, so the device is not squatting on some other
-  company's identity.
-- It is self-documenting — anyone who recognises it knows it is a placeholder.
-- The upgrade path is a **PID-only** change. Applying to pid.codes is a free
-  pull request, and the vendor half never moves.
+Every USB device announces a **vendor ID** and a **product ID**. Vendor IDs come
+from the USB-IF and cost real money. `0x1209` is **pid.codes**, a vendor ID held
+in trust for open-source hardware and given out free; `0x0001` under it is their
+designated **test PID**, for a device that has not been allocated one of its own
+yet. Getting a real product ID is therefore a **PID-only** change — the vendor
+half never moves.
 
 **The caveat, in their words.** pid.codes state that `1209:0001` "is reserved
 for use in private testing. Anyone may assign it to their device while they're
@@ -113,25 +103,17 @@ testing in-house, but it MUST NOT be used on any device that will be
 redistributed, sold, or manufactured."
 
 That is a prohibition, not a preference — and it binds on redistributing a
-**device**. A GitHub Release here ships daemon packages, not hardware; the only
-stick carrying `1209:0001` is the author's own, which is the private in-house
-testing the PID exists for. Publishing on it was weighed and accepted on that
-basis (§9). It would stop being defensible the moment sticks are handed to other
-people.
+**device**. A GitHub Release here ships daemon packages, not hardware, and the
+only stick carrying `1209:0001` is the author's own. Publishing on it was
+weighed and accepted on that basis (§9), and stops being defensible the moment
+sticks are handed to other people.
 
-**Getting a real one is not blocked on releasing.** pid.codes ask only for a
-publicly available source repository with an open-source licence — not a
-shipped product, not a release. So the application can go in as soon as there is
-a LICENSE, and can run in parallel with everything else. Note that PIDs
-`0x0000`–`0x1FFF` are reserved and cannot be requested, so the allocated number
-will be `0x2000` or above.
-
-**Do not substitute a made-up number in the meantime.** A random PID under
-`0x1209` squats on a registry that may legitimately assign it to somebody else,
-which recreates the exact collision the registry exists to prevent — and does so
-in the namespace you are about to ask a favour from. A random *vendor* ID is
-worse still: that is what `1234:5678` was. The test PID is the honest choice
-until the real one arrives.
+**Applying is not blocked on anything.** pid.codes want only a public source
+repository under an open-source licence, which now exists — so the pull request
+can go in at any time. PIDs `0x0000`–`0x1FFF` are reserved, so the allocated
+number will be `0x2000` or above. Do not substitute a made-up number while
+waiting: that squats on a registry which may legitimately assign it to somebody
+else, in the namespace you are about to ask a favour from.
 
 The value lives in **five** hand-kept places, which must change together:
 
@@ -184,6 +166,8 @@ The more important rule is what happens when the stick is **not connected**:
 - **Nothing enumerated** → give up immediately. There is nothing to wait for.
 - **A handle we had just stopped working** → retry until the deadline, because
   the device demonstrably exists and is probably re-enumerating.
+- **A command owed to a device that has not arrived yet** → not the transport's
+  problem. It waits for the arrival notification in §5, never on a timer.
 
 That distinction is what lets you leave the daemon installed with the stick
 unplugged and have sleep and shutdown behave completely normally. Without it,
@@ -194,7 +178,7 @@ up every single time.
 
 ## 4. The firmware (`firmware/`)
 
-Five source files, about 1,100 lines.
+Five modules, about 1,250 lines.
 
 | File | Does |
 |---|---|
@@ -231,6 +215,11 @@ be worse still — the same code in both fields flips the TV on every command,
 which is the drift discrete codes exist to prevent. Owners of those sets add a
 profile through the web UI instead.
 
+That difference is structural, not bad luck. LG, Samsung, Sony and Toshiba
+design their own remotes across a whole product line, so one code set covers the
+brand. TCL and Hisense are assemblers — the same model number ships as a Roku TV
+in one market and a Google TV in another, with different remotes.
+
 The *Not Configured* path still exists and still matters: it catches a
 user-added profile saved with one or both codes blank.
 
@@ -238,11 +227,6 @@ user-added profile saved with one or both codes blank.
 `Profiles::begin()` writes them only when `profiles.json` is absent, so picking
 up a new default set needs a factory reset — hold the button past 16 s.
 Re-flashing alone is not enough.
-
-That difference is structural, not bad luck. LG, Samsung, Sony and Toshiba
-design their own remotes across a whole product line, so one code set covers the
-brand. TCL and Hisense are assemblers — the same model number ships as a Roku TV
-in one market and a Google TV in another, with different remotes.
 
 **Only LG is proven on hardware.** The other three are derived from corroborated
 sources and cross-checked against the encoder, but nobody has pointed the stick
@@ -432,7 +416,7 @@ small interfaces, which is what keeps Linux and Windows from tangling:
 `main.cpp` picks the right monitor for the platform and connects them. That
 split is why Windows support could be added later without disturbing Linux.
 
-### Linux (`LinuxPowerMonitor`, ~215 lines)
+### Linux (`LinuxPowerMonitor`, ~235 lines)
 
 Linux makes this easy. `systemd-logind` broadcasts `PrepareForSleep` and
 `PrepareForShutdown` over D-Bus, and — crucially — lets a program take an
@@ -479,7 +463,7 @@ uptime under 3 minutes — checked at startup **and again on arrival**. The firs
 stops a package upgrade restarting the service at 3 a.m. from turning your TV
 on. The second stops replugging the stick a week later from doing the same.
 
-### Windows (`WindowsPowerMonitor`, ~450 lines)
+### Windows (`WindowsPowerMonitor`, ~545 lines)
 
 Windows is harder, for two reasons.
 
@@ -577,7 +561,10 @@ was already fixed once.
 
 **Threading**
 - `HIDTransport` is single-threaded and holds no lock. On Windows only the
-  worker thread touches it; a control handler records and returns.
+  worker thread touches it; a control handler records and returns. On Linux the
+  udev callback runs on the same thread as the D-Bus dispatch, which is what
+  keeps that true — moving the device watch onto a thread of its own would make
+  a lock mandatory.
 
 **Storage**
 - Flash writes are atomic *and* length-checked. Atomically replacing a file with
@@ -595,7 +582,11 @@ Windows uses a named mutex.
 the process is killed — including the shutdown `OFF` confirmation, the single
 most useful line — are lost.
 
-**Build**
+**Build and unit**
+- The unit's `RestrictAddressFamilies` must keep `AF_NETLINK` alongside
+  `AF_UNIX`, in both the unit file and the NixOS module. Tightening it back to
+  `AF_UNIX` alone silently disables the device watch and loses the boot `ON`,
+  while leaving everything else working — see §5.
 - `ARDUINO_USB_MODE` must be `0`. At `1` the device enumerates as a serial port
   and the daemon never finds it.
 - The flash partition table is stated explicitly. If a toolchain bump moved the
@@ -606,48 +597,36 @@ most useful line — are lost.
 
 ## 7. Building and installing
 
-**Firmware** (needs PlatformIO):
-```
-cd firmware
-pio run -t upload      # the firmware
-pio run -t uploadfs    # the web UI into LittleFS — needed once
-```
+**The step-by-step lives in [`README.md`](README.md)** — bill of materials,
+wiring, flashing, per-OS install and the service account. It is not repeated
+here, because two copies of an install procedure drift and the README is the one
+a stranger will read. What follows is only what the README does not say.
 
-**Daemon, Linux:**
-```
-cmake -B daemon/build -S daemon -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build daemon/build
-sudo cmake --install daemon/build
-```
-Needs `sdbus-c++` **2.x** (1.x will not compile), `hidapi` and `libudev` — the
-last ships with systemd, so it is already present. Then create the
-`esp32ir` user and group, reload udev, and enable the service — the packages in
-`daemon/packaging/` do all of that for you.
+**Dependencies.** `sdbus-c++` **2.x** (1.x will not compile — the version is
+asserted in `find_package` so it fails immediately rather than deep in template
+errors), `hidapi`, and `libudev` for the device watch. All three are present on
+any machine that can run the daemon at all, since it already requires systemd.
 
-The prefix matters and is easy to get wrong. `install()` uses relative
-destinations (`lib/udev/rules.d`, `lib/systemd/system`), so the default
+**The install prefix matters and is easy to get wrong.** `install()` uses
+relative destinations (`lib/udev/rules.d`, `lib/systemd/system`), so the default
 `/usr/local` prefix lands them in `/usr/local/lib/...` — which **neither udev
 nor systemd reads**. The install reports success, then the daemon cannot open
 the device and `systemctl enable` cannot find the unit. The relative paths are
 themselves deliberate, because CPack rebases them when staging a package; the
-cost is that a hand install has to name the prefix.
+cost is that a hand install has to pass `-DCMAKE_INSTALL_PREFIX=/usr`.
 
-**Packaged:** `.deb` and `.rpm` are built by GitHub Actions on a `v*` tag;
-Arch builds from `daemon/packaging/PKGBUILD`; NixOS has a flake and a module
-(`services.esp32-ir-remote.enable = true;`).
+**Four packaging routes, one build.** `.deb` and `.rpm` come from CPack via
+GitHub Actions on a `v*` tag; Arch builds from `daemon/packaging/PKGBUILD` on
+the user's own machine; NixOS has a flake and a module
+(`services.esp32-ir-remote.enable = true;`). All four call the project's own
+`CMakeLists.txt` rather than reimplementing the build, so none of them can
+drift from what a source build produces.
 
-**Daemon, Windows** (needs Visual Studio Build Tools and vcpkg's hidapi):
-```
-cmake -B daemon/build -S daemon -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build daemon/build --config Release
-```
-Then from an **elevated** PowerShell:
-```
-powershell -ExecutionPolicy Bypass -File .\install-service.ps1 -BinaryPath <path>\esp32-ir-daemon.exe
-```
-Logs go to `C:\ProgramData\ESP32IRRemote\daemon.log`.
-`verify-windows.ps1` writes a report of what the machine is and what the daemon
-did, for comparing behaviour across machines.
+**Windows** needs Visual Studio Build Tools and vcpkg's hidapi, and the service
+must be registered by `install-service.ps1` from an elevated PowerShell — a
+plain program is never sent power events. Logs go to
+`C:\ProgramData\ESP32IRRemote\daemon.log`. `verify-windows.ps1` writes a report
+of what the machine is and what the daemon did, for comparing across machines.
 
 ---
 
@@ -730,8 +709,8 @@ shipped once and passed a reboot-and-sleep test; §5 has the cause.
 | Gap | Severity |
 |---|---|
 | **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID. Acceptable while the only stick is the author's (§2); must be replaced before any hardware reaches another person. Hand-copied into **five** files. | Medium |
-| **The README makes claims that will age.** Its Status table says Windows is less tested and that only LG is hardware-verified. Both are true now; both need revisiting when they stop being true. | Low |
-| **No release guard.** Any `v*` tag publishes a public Release with the packages attached. Nothing checks first that a real product ID is in place, or that a LICENSE exists. One mistyped `git push --tags` publishes. | Medium |
+| **The README Status table needs a pass before tagging.** It says "Releases: None tagged yet", which would ship inside the release contradicting itself. Its Windows and LG-only claims are true now but will age. | Low |
+| **No release guard.** Any `v*` tag publishes a public Release with the packages attached. Nothing checks the version, the PID or anything else first. One mistyped `git push --tags` publishes. | Medium |
 | **A hand install with the default prefix silently half-works.** `cmake --install` without `-DCMAKE_INSTALL_PREFIX=/usr` puts the udev rule and unit under `/usr/local/lib/`, which nothing reads. Documented in §7, but a `message(WARNING)` in `CMakeLists.txt` when the prefix is not `/usr` would catch it at the point of the mistake. | Medium |
 | **No profile for TCL or Hisense** — no usable discrete codes appear to exist for either brand. Not fixable from a database; it needs somebody with the TV in front of them. Those users add a profile by hand. See §4. | Low |
 | **Samsung, Sony and Toshiba codes are unverified on hardware.** Derived from corroborated sources and cross-checked against the encoder, but nobody has pointed the stick at one of those TVs. | Medium |
@@ -754,10 +733,9 @@ attached. There are no tags yet. Everything is staged at `1.0.0`, and as of the
 udev watch being verified on hardware (§8) **nothing is holding the tag back**.
 The remaining items below are all improvements rather than blockers.
 
-Releasing on the test PID was weighed and accepted: what ships in a Release is
-daemon packages, not devices, and the only stick in existence carrying
-`1209:0001` is the author's own. The prohibition in §2 binds on redistributing
-*hardware*. A real PID remains item 2 below.
+Releasing on the test PID was weighed and accepted — the prohibition binds on
+redistributing hardware, and only daemon packages ship (§2). A real PID is
+still item 2 below.
 
 1. **Verify the new codes on real TVs** if any are within reach — Samsung, Sony
    and Toshiba are all derived rather than tested. A Samsung is the one most
