@@ -35,7 +35,7 @@ Working and in daily use, but not yet released — read this before relying on i
 | **Windows** | Builds and runs as a service, tested less. Some paths unverified |
 | **TV profiles** | LG is verified on real hardware. Samsung, Sony and Toshiba are derived from published code databases but **untested** |
 | **Releases** | None tagged yet. Build from source for now |
-| **USB ID** | Currently `1209:0001`, a shared *test* ID. A permanent one is being applied for |
+| **USB ID** | Currently `1209:0001`, a shared *test* ID. A permanent one will be applied for; see [`brief.md`](brief.md) §2 |
 
 ---
 

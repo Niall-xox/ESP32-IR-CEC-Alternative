@@ -655,15 +655,39 @@ did, for comparing behaviour across machines.
 
 ### Working and verified on hardware (Linux)
 
-Sleep, wake and shutdown confirmed on NixOS: the inhibitor lock held the
-poweroff off until the ESP32 confirmed the IR had gone out. The uptime gate was
-proven both ways. Unconfigured-profile handling was proven (Samsung selected,
-nothing transmitted, `Not Configured` on screen).
+Sleep, wake, shutdown and boot all confirmed on NixOS, the last of them through
+the udev watch. The inhibitor lock held the poweroff off until the ESP32
+confirmed the IR had gone out. The uptime gate was proven both ways.
+Unconfigured-profile handling was proven (Samsung selected, nothing transmitted,
+`Not Configured` on screen).
 
-**Boot is not currently in that list.** It worked, then regressed when the
-transport was changed to fail fast on an unenumerated device — the boot `ON`
-was the one caller relying on the old retry. That is what the udev watch in §5
-replaces, and it is unverified until the reboot test below.
+**The boot sequence, from a real journal**, with the stick unplugged at power-on
+and pushed in ten seconds later:
+
+```
+19:58:58.863  [transport] ESP32 not found at startup
+19:58:58.965  [monitor]   Watching udev for the ESP32
+19:58:58.972  [cmd]       ON FAILED — no ACK (startup)
+19:58:58.972  [cmd]       ON deferred until the ESP32 appears
+19:59:09.568  [monitor]   ESP32 appeared
+19:59:09.758  [cmd]       ON sent and ACK received (device ready)
+```
+
+**How far behind the daemon the stick actually is: 4.5 seconds, every boot.**
+Measured across three consecutive normal boots, stick plugged in throughout,
+and it did not vary. This was never a rare race — the boot `ON` was being lost
+every single time. Worth knowing if the design is ever revisited: any fixed
+retry window would need to clear 4.5 s comfortably on this machine alone.
+
+Filter precision was checked separately with `udevadm trigger
+--subsystem-match=hidraw --action=add`, which fires an `add` for every hidraw
+node. Eleven devices, exactly one `ESP32 appeared` — no false positives from
+the other ten, no missed match on ours.
+
+Sleep, wake and shutdown were re-confirmed *after* the watch was working, so
+they ran through the `poll()` loop rather than the `enterEventLoop()` fallback.
+Each send ACKed in ~122 ms. Idle cost of the loop is nil: 0.0% CPU, no
+measurable CPU time over a hundred seconds.
 
 ### Working, less proven (Windows)
 
@@ -674,24 +698,14 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 ### Needs testing
 
-**Linux — the udev device watch.** First confirm it started at all: the journal
-must show `Watching udev for the ESP32`. If it says `udev watch unavailable`,
-the daemon has fallen back and nothing below is being tested — check the
-sandbox, per §5.
+**If the boot `ON` is ever reported missing again, read the log before anything
+else.** `Watching udev for the ESP32` means the doorbell is live. `udev watch
+unavailable` means the daemon has fallen back to `enterEventLoop()` and the
+whole mechanism is dormant — and because the fallback keeps sleep, wake and
+shutdown working perfectly, nothing else will look wrong. That exact failure
+shipped once and passed a reboot-and-sleep test; §5 has the cause.
 
-With the watch up, sleep, wake and shutdown all need re-confirming, because
-`run()` is then a hand-written `poll()` loop rather than `enterEventLoop()`. The
-fallback path has been exercised; the poll loop has not.
-
-The arrival path itself is the hard one to observe, because it only fires when
-the stick is *slower* than the daemon. A boot where the journal shows
-`HID device opened` immediately followed by `ON sent and ACK received (startup)`
-proves nothing about it — the stick was simply already there. What confirms it
-is `ESP32 appeared` followed by `ON sent and ACK received (device ready)`. If a
-natural boot will not produce that, force it: start the service with the stick
-unplugged, plug it in within the 3-minute window, and watch for those two lines.
-
-**Windows** — all three need the Windows machine:
+**Windows** — all five need the Windows machine:
 
 1. **S3 machine**: an idle screen blank should now turn the TV off. It
    previously did not. The biggest behaviour change of the lot.
@@ -736,9 +750,9 @@ In the order that gets the project finished.
 
 **Tagging is the act of publishing, not a bookmark.** `packages.yml` triggers on
 any `v*` tag and puts out a **public GitHub Release** with the `.deb` and `.rpm`
-attached. There are no tags yet. Everything is staged at `1.0.0`, and the one
-thing still owed before tagging is a reboot test of the udev device watch (§8) —
-publishing a release whose headline fix is unverified is the wrong order.
+attached. There are no tags yet. Everything is staged at `1.0.0`, and as of the
+udev watch being verified on hardware (§8) **nothing is holding the tag back**.
+The remaining items below are all improvements rather than blockers.
 
 Releasing on the test PID was weighed and accepted: what ships in a Release is
 daemon packages, not devices, and the only stick in existence carrying
