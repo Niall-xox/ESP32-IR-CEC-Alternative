@@ -50,6 +50,11 @@ if(UNIX AND NOT APPLE)
     # fail immediately with "found version 1.x, required 2.0".
     list(APPEND SOURCES src/LinuxPowerMonitor.cpp)
     find_package(sdbus-c++ 2.0 REQUIRED)
+
+    # libudev supplies the device-arrival notification the boot ON waits on. It
+    # ships with systemd, which this daemon already requires for logind.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(UDEV REQUIRED IMPORTED_TARGET libudev)
 elseif(WIN32)
     # Windows: power events via the Win32 Service API
     list(APPEND SOURCES src/WindowsPowerMonitor.cpp)
@@ -110,7 +115,7 @@ find_package(Threads REQUIRED)
 target_link_libraries(esp32-ir-daemon PRIVATE Threads::Threads)
 
 if(UNIX AND NOT APPLE)
-    target_link_libraries(esp32-ir-daemon PRIVATE SDBusCpp::sdbus-c++)
+    target_link_libraries(esp32-ir-daemon PRIVATE SDBusCpp::sdbus-c++ PkgConfig::UDEV)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -186,13 +191,13 @@ if(UNIX AND NOT APPLE)
     # now fails at install time with a legible dependency error instead of
     # producing a daemon that cannot start.
     set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libsdbus-c++2 (>= 2.0), libhidapi-hidraw0")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libsdbus-c++2 (>= 2.0), libhidapi-hidraw0, libudev1")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst;${CMAKE_CURRENT_SOURCE_DIR}/packaging/prerm")
 
     set(CPACK_RPM_PACKAGE_LICENSE "GPLv3+")
-    set(CPACK_RPM_PACKAGE_REQUIRES "sdbus-cpp >= 2.0, hidapi")
+    set(CPACK_RPM_PACKAGE_REQUIRES "sdbus-cpp >= 2.0, hidapi, systemd-libs")
     set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
     set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst")

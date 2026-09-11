@@ -1,5 +1,11 @@
 #include "LinuxPowerMonitor.h"
 
+#include <libudev.h>
+#include <poll.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 
@@ -7,7 +13,8 @@ static constexpr auto LOGIND_SERVICE   = "org.freedesktop.login1";
 static constexpr auto LOGIND_OBJECT    = "/org/freedesktop/login1";
 static constexpr auto LOGIND_INTERFACE = "org.freedesktop.login1.Manager";
 
-LinuxPowerMonitor::LinuxPowerMonitor() {
+LinuxPowerMonitor::LinuxPowerMonitor(uint16_t vid, uint16_t pid)
+    : vid_(vid), pid_(pid) {
 
     connection_ = sdbus::createSystemBusConnection();
 
@@ -26,14 +33,24 @@ LinuxPowerMonitor::LinuxPowerMonitor() {
     if (!takeInhibitorLock()) {
         throw std::runtime_error("logind refused the initial inhibitor lock");
     }
+
+    if (!startDeviceWatch()) {
+        std::cerr << "[monitor] udev watch unavailable — a stick that enumerates"
+                     " after this point will not be noticed\n";
+    }
 }
 
 LinuxPowerMonitor::~LinuxPowerMonitor() {
+    stopDeviceWatch();
     releaseInhibitorLock();
 }
 
 void LinuxPowerMonitor::setOnCommand(std::function<bool(const TvCommand&)> cb) {
     onCommand_ = std::move(cb);
+}
+
+void LinuxPowerMonitor::setOnDeviceChange(std::function<void(bool)> cb) {
+    onDeviceChange_ = std::move(cb);
 }
 
 void LinuxPowerMonitor::assertTv(bool on, const char* reason) {
@@ -45,8 +62,105 @@ void LinuxPowerMonitor::assertTv(bool on, const char* reason) {
     }
 }
 
+bool LinuxPowerMonitor::startDeviceWatch() {
+    udev_ = udev_new();
+    if (!udev_) return false;
+
+    deviceWatch_ = udev_monitor_new_from_netlink(udev_, "udev");
+    if (!deviceWatch_) {
+        stopDeviceWatch();
+        return false;
+    }
+
+    if (udev_monitor_filter_add_match_subsystem_devtype(deviceWatch_, "hidraw", nullptr) < 0 ||
+        udev_monitor_enable_receiving(deviceWatch_) < 0) {
+        stopDeviceWatch();
+        return false;
+    }
+
+    deviceWatchFd_ = udev_monitor_get_fd(deviceWatch_);
+    if (deviceWatchFd_ < 0) {
+        stopDeviceWatch();
+        return false;
+    }
+
+    std::cout << "[monitor] Watching udev for the ESP32\n";
+    return true;
+}
+
+void LinuxPowerMonitor::stopDeviceWatch() {
+    if (deviceWatch_) {
+        udev_monitor_unref(deviceWatch_);
+        deviceWatch_ = nullptr;
+    }
+    if (udev_) {
+        udev_unref(udev_);
+        udev_ = nullptr;
+    }
+    deviceWatchFd_ = -1;
+}
+
+// A hidraw node carries no USB ids of its own — they belong to the usb_device
+// it hangs off. The parent is owned by dev and must not be unreferenced.
+bool LinuxPowerMonitor::isOurDevice(udev_device* dev) const {
+    udev_device* usb =
+        udev_device_get_parent_with_subsystem_devtype(dev, "usb", "usb_device");
+    if (!usb) return false;
+
+    const char* vendor  = udev_device_get_sysattr_value(usb, "idVendor");
+    const char* product = udev_device_get_sysattr_value(usb, "idProduct");
+    if (!vendor || !product) return false;
+
+    char expected[8];
+    std::snprintf(expected, sizeof(expected), "%04x", vid_);
+    if (std::strcmp(vendor, expected) != 0) return false;
+
+    std::snprintf(expected, sizeof(expected), "%04x", pid_);
+    return std::strcmp(product, expected) == 0;
+}
+
+void LinuxPowerMonitor::drainDeviceEvents() {
+    while (udev_device* dev = udev_monitor_receive_device(deviceWatch_)) {
+        const char* action = udev_device_get_action(dev);
+
+        if (action && std::strcmp(action, "add") == 0 && isOurDevice(dev)) {
+            std::cout << "[monitor] ESP32 appeared\n";
+            if (onDeviceChange_) {
+                try { onDeviceChange_(true); } catch (...) {}
+            }
+        }
+
+        udev_device_unref(dev);
+    }
+}
+
 void LinuxPowerMonitor::run() {
-    connection_->enterEventLoop();
+    if (deviceWatchFd_ < 0) {
+        connection_->enterEventLoop();
+        return;
+    }
+
+    while (true) {
+        // sd-bus recalculates these after every batch of work, so they cannot
+        // be hoisted out of the loop.
+        const auto pd = connection_->getEventLoopPollData();
+
+        pollfd fds[3] = {
+            { pd.fd,          pd.events, 0 },
+            { pd.eventFd,     POLLIN,    0 },
+            { deviceWatchFd_, POLLIN,    0 },
+        };
+
+        if (::poll(fds, 3, pd.getPollTimeout()) < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "[monitor] poll failed: " << std::strerror(errno) << "\n";
+            return;
+        }
+
+        if (fds[2].revents & POLLIN) drainDeviceEvents();
+
+        while (connection_->processPendingEvent()) {}
+    }
 }
 
 bool LinuxPowerMonitor::takeInhibitorLock() {

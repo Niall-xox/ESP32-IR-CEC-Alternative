@@ -104,7 +104,8 @@ cmake --build daemon/build
 sudo cmake --install daemon/build
 ```
 
-Requires `sdbus-c++` **2.x** and `hidapi`.
+Requires `sdbus-c++` **2.x**, `hidapi` and `libudev` (the development package —
+the library itself ships with systemd, so it is already installed).
 
 > **`-DCMAKE_INSTALL_PREFIX=/usr` is not optional.** The default prefix is
 > `/usr/local`, which puts the udev rule in `/usr/local/lib/udev/rules.d/` and
@@ -311,6 +312,7 @@ Built on these, with thanks:
 | [ArduinoJson](https://arduinojson.org/) | MIT |
 | [Adafruit SSD1306 / GFX](https://github.com/adafruit/Adafruit_SSD1306) | BSD |
 | [hidapi](https://github.com/libusb/hidapi) | BSD / GPL-3 / HIDAPI |
+| [libudev](https://github.com/systemd/systemd) (systemd) | LGPL-2.1 |
 | [sdbus-c++](https://github.com/Kistler-Group/sdbus-cpp) | LGPL-2.1 |
 | [irdb](https://github.com/probonopd/irdb) | IR code database |
 

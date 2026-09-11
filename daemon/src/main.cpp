@@ -23,6 +23,7 @@ static constexpr uint16_t DEVICE_PID = 0x0001;
 
 static constexpr double BOOT_WINDOW_SECONDS = 180.0;
 
+// Guards the boot ON against a package upgrade restarting the service at 3am.
 static bool systemJustBooted() {
     std::ifstream uptimeFile("/proc/uptime");
     double uptimeSeconds = 0.0;
@@ -124,7 +125,7 @@ int main() {
 
 #ifdef __linux__
     try {
-        monitor = std::make_unique<LinuxPowerMonitor>();
+        monitor = std::make_unique<LinuxPowerMonitor>(DEVICE_VID, DEVICE_PID);
         std::cout << "[monitor] Connected to systemd-logind\n";
     } catch (const std::exception& e) {
         std::cerr << "[error] Failed to connect to D-Bus: " << e.what() << "\n";
@@ -153,14 +154,30 @@ int main() {
         return report(cmd, c.reason, transport->send(cmd));
     });
 
+#ifdef __linux__
+    bool bootOnPending = false;
+#endif
+
     monitor->setOnDeviceChange([&](bool present) {
-        if (!present) transport->invalidate();
+        if (!present) {
+            transport->invalidate();
+            return;
+        }
+#ifdef __linux__
+        // Delivers the boot ON when the stick enumerates after the daemon starts.
+        if (bootOnPending && systemJustBooted()) {
+            bootOnPending = !report("ON", "device ready", transport->send("ON"));
+        }
+#endif
     });
 
 #ifdef __linux__
 
     if (systemJustBooted()) {
-        report("ON", "startup", transport->send("ON"));
+        bootOnPending = !report("ON", "startup", transport->send("ON"));
+        if (bootOnPending) {
+            std::cout << "[cmd] ON deferred until the ESP32 appears\n";
+        }
     } else {
         std::cout << "[cmd] ON skipped — service restarted on an already-running "
                      "system, not a boot\n";

@@ -55,7 +55,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            cmake g++ pkg-config libsdbus-c++-dev libhidapi-dev
+            cmake g++ pkg-config libsdbus-c++-dev libhidapi-dev libudev-dev
       - name: Configure and build
         run: |
           cmake -B daemon/build -S daemon
@@ -76,7 +76,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             cmake g++ pkg-config file \
-            libsdbus-c++-dev libhidapi-dev
+            libsdbus-c++-dev libhidapi-dev libudev-dev
 
       - name: Build
         run: |
@@ -114,7 +114,7 @@ jobs:
         run: |
           dnf install -y --setopt=install_weak_deps=False \
             cmake gcc-c++ pkgconf-pkg-config rpm-build \
-            sdbus-cpp-devel hidapi-devel
+            sdbus-cpp-devel hidapi-devel systemd-devel
 
       - name: Build
         run: |

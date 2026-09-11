@@ -112,11 +112,12 @@ for use in private testing. Anyone may assign it to their device while they're
 testing in-house, but it MUST NOT be used on any device that will be
 redistributed, sold, or manufactured."
 
-That is a prohibition, not a preference — but it binds at the moment of
-*distribution*, and nothing has been distributed. Private in-house testing is
-exactly what this PID is for, so using it today is correct rather than merely
-tolerated. It becomes a violation the moment a release is tagged, which is one
-reason tagging waits (§9).
+That is a prohibition, not a preference — and it binds on redistributing a
+**device**. A GitHub Release here ships daemon packages, not hardware; the only
+stick carrying `1209:0001` is the author's own, which is the private in-house
+testing the PID exists for. Publishing on it was weighed and accepted on that
+basis (§9). It would stop being defensible the moment sticks are handed to other
+people.
 
 **Getting a real one is not blocked on releasing.** pid.codes ask only for a
 publicly available source repository with an open-source licence — not a
@@ -232,6 +233,11 @@ profile through the web UI instead.
 
 The *Not Configured* path still exists and still matters: it catches a
 user-added profile saved with one or both codes blank.
+
+**Changing the defaults does not change a device that has already booted.**
+`Profiles::begin()` writes them only when `profiles.json` is absent, so picking
+up a new default set needs a factory reset — hold the button past 16 s.
+Re-flashing alone is not enough.
 
 That difference is structural, not bad luck. LG, Samsung, Sony and Toshiba
 design their own remotes across a whole product line, so one code set covers the
@@ -415,7 +421,7 @@ it. Power syncing keeps working normally while it is up.
 
 ## 5. The daemon (`daemon/`)
 
-About 1,100 lines of C++, one binary, built with CMake. It is built around two
+About 1,450 lines of C++, one binary, built with CMake. It is built around two
 small interfaces, which is what keeps Linux and Windows from tangling:
 
 - **`ITransport`** — "send this command, tell me if it was confirmed."
@@ -426,7 +432,7 @@ small interfaces, which is what keeps Linux and Windows from tangling:
 `main.cpp` picks the right monitor for the platform and connects them. That
 split is why Windows support could be added later without disturbing Linux.
 
-### Linux (`LinuxPowerMonitor`, ~140 lines)
+### Linux (`LinuxPowerMonitor`, ~215 lines)
 
 Linux makes this easy. `systemd-logind` broadcasts `PrepareForSleep` and
 `PrepareForShutdown` over D-Bus, and — crucially — lets a program take an
@@ -448,9 +454,21 @@ that the delay window has already opened. logind collects who holds delay locks,
 program that was not already holding one is not on the list being waited for. So
 the daemon takes the lock at startup and re-takes it on every wake.
 
-Boot is handled separately: on startup the daemon reads `/proc/uptime` and only
-sends `ON` if the machine has been up less than 3 minutes. Without that gate, a
-package upgrade restarting the service at 3 a.m. would turn your TV on.
+**Boot is handled separately, and waits for the stick.** The daemon reaches
+`multi-user.target` before the ESP32 has finished enumerating — the stick is
+powered by the machine that is booting, so it is running its own `setup()` while
+systemd is starting us. The `ON` it owes has nowhere to go yet.
+
+Rather than retry on a timer, the daemon subscribes to **udev** and is told when
+a matching hidraw node appears. That is the same kind of doorbell it already
+uses for sleep, so `run()` waits on both at once with `poll()` rather than
+`enterEventLoop()`. If the udev watch cannot be set up it falls back to
+`enterEventLoop()` and the sleep path is unaffected.
+
+Two guards decide whether that `ON` is actually sent: `systemJustBooted()` —
+uptime under 3 minutes — checked at startup **and again on arrival**. The first
+stops a package upgrade restarting the service at 3 a.m. from turning your TV
+on. The second stops replugging the stick a week later from doing the same.
 
 ### Windows (`WindowsPowerMonitor`, ~450 lines)
 
@@ -494,6 +512,26 @@ Suspend and resume are kept underneath as a second trigger, in case a lid-close
 or an explicit Sleep ever reaches us without a display-state change first.
 Duplicate commands are harmless because the codes are discrete.
 
+Windows sees device arrival too, through `RegisterDeviceNotification`, and it is
+what delivers the boot `ON` there — the display-state notification decides the
+state, and arrival re-sends it if the stick was not yet present. A mid-session
+replug leaves the TV alone, because the re-assert only happens within
+`ARRIVAL_GRACE` of the service starting.
+
+**That window is measured from service start, not system uptime, and the
+difference matters.** Windows **Fast Startup** is on by default on 10 and 11 and
+does not perform a real boot — it hibernates the kernel session and restores it
+— so `GetTickCount64()` can report hours after what the user experienced as a
+cold start. An uptime-based gate would skip the boot `ON` on most Windows
+machines. The service genuinely did just start either way, so that is the clock
+to measure against.
+
+Linux cannot use the same trick, and does not need to. Its trigger is the daemon
+starting, which *does* happen on a service restart, so it has to ask the system
+how long the machine has been up. Windows' trigger is device arrival, which does
+not fire on a restart. The two platforms answer different questions, which is
+why the check is not shared code.
+
 One nice consequence: `PBT_APMRESUMEAUTOMATIC` — the machine waking itself for a
 maintenance task at 3 a.m. — needs no special case. The display stays off, so no
 `ON` is sent. The behaviour falls out of the model instead of being hand-coded.
@@ -525,7 +563,8 @@ was already fixed once.
   get to pass a budget; earlier versions let them, and it went wrong in both
   directions.
 - When no device is enumerated, fail immediately. Retrying is only ever correct
-  for a device that was open a moment ago.
+  for a device that was open a moment ago. A command owed to a device that has
+  not arrived yet waits for the arrival notification, never on a timer.
 
 **Threading**
 - `HIDTransport` is single-threaded and holds no lock. On Windows only the
@@ -571,7 +610,8 @@ cmake -B daemon/build -S daemon -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build daemon/build
 sudo cmake --install daemon/build
 ```
-Needs `sdbus-c++` **2.x** (1.x will not compile) and `hidapi`. Then create the
+Needs `sdbus-c++` **2.x** (1.x will not compile), `hidapi` and `libudev` — the
+last ships with systemd, so it is already present. Then create the
 `esp32ir` user and group, reload udev, and enable the service — the packages in
 `daemon/packaging/` do all of that for you.
 
@@ -606,10 +646,15 @@ did, for comparing behaviour across machines.
 
 ### Working and verified on hardware (Linux)
 
-Sleep, wake, shutdown and boot all confirmed on NixOS: the inhibitor lock held
-the poweroff off until the ESP32 confirmed the IR had gone out. The uptime gate
-was proven both ways. Unconfigured-profile handling was proven (Samsung
-selected, nothing transmitted, `Not Configured` on screen).
+Sleep, wake and shutdown confirmed on NixOS: the inhibitor lock held the
+poweroff off until the ESP32 confirmed the IR had gone out. The uptime gate was
+proven both ways. Unconfigured-profile handling was proven (Samsung selected,
+nothing transmitted, `Not Configured` on screen).
+
+**Boot is not currently in that list.** It worked, then regressed when the
+transport was changed to fail fast on an unenumerated device — the boot `ON`
+was the one caller relying on the old retry. That is what the udev watch in §5
+replaces, and it is unverified until the reboot test below.
 
 ### Working, less proven (Windows)
 
@@ -618,35 +663,25 @@ the three sleep models. Behaves correctly in the cases tested, but has had
 nothing like Linux's exercise — and the display-state simplification below
 changes its behaviour on S3 machines, so those need re-testing.
 
-### Needs re-testing after the 2026-09-09 changes
+### Needs testing
 
-All remaining items need the Windows machine; Linux is done.
+**Linux — the udev device watch.** Reboot with the stick plugged in; the journal
+should show `ESP32 appeared` followed by `ON sent and ACK received (device
+ready)`. Then confirm sleep, wake and shutdown still work, because `run()` now
+waits on `poll()` rather than `enterEventLoop()`.
 
-1. **Windows, S3 machine**: an idle screen blank should now turn the TV off. It
+**Windows** — all three need the Windows machine:
+
+1. **S3 machine**: an idle screen blank should now turn the TV off. It
    previously did not. The biggest behaviour change of the lot.
-2. **Windows, stick unplugged**: shutdown should be instant, where it was
-   previously delayed by up to 20 s.
-3. **Windows, normal sleep/wake**: confirm the single 2 s timeout is enough.
-
-**Confirmed 2026-09-09 — Linux, stick unplugged.** Sleep is visibly faster with
-no stick connected, which is the transport's fail-fast open doing its job. The
-old behaviour is preserved in the journal from that morning's boot, and is worth
-keeping as the before-picture:
-
-```
-15:17:10  [transport] ESP32 not found at startup — will retry when needed
-15:17:14  [transport] ESP32 not found — skipping IR command: ON
-15:17:14  [cmd] ON FAILED — no ACK, TV state not changed (startup)
-```
-
-Four seconds between finding no device and giving up — the old send budget
-polling for something that was never going to appear. That delay landed on every
-sleep and every shutdown.
-
-**Also confirmed 2026-09-09 on Linux**, after the full re-flash: sleep and wake
-with the stick connected under the single 2 s timeout; profile cycling across
-the four-profile default; and factory reset and profile deletion through the web
-UI, which had never been exercised before.
+2. **Stick unplugged**: shutdown should be instant, where it was previously
+   delayed by up to 20 s.
+3. **Normal sleep/wake**: confirm the single 2 s timeout is enough.
+4. **Boot with Fast Startup on** (the default): the TV should come on. This is
+   what `ARRIVAL_GRACE` being measured from service start rather than uptime
+   exists for, and it is the case an uptime-based gate would have silently
+   broken on most machines.
+5. **Replug mid-session**: the TV should *not* change state.
 
 ### Not verified
 
@@ -659,7 +694,7 @@ UI, which had never been exercised before.
 
 | Gap | Severity |
 |---|---|
-| **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID that pid.codes ask not to be distributed on. Needs a PID of its own before release, and it is hand-copied into **five** files. See §2. | High |
+| **Test USB PID `1209:0001`.** A real vendor ID, but a *shared* test PID. Acceptable while the only stick is the author's (§2); must be replaced before any hardware reaches another person. Hand-copied into **five** files. | Medium |
 | **The README makes claims that will age.** Its Status table says Windows is less tested and that only LG is hardware-verified. Both are true now; both need revisiting when they stop being true. | Low |
 | **No release guard.** Any `v*` tag publishes a public Release with the packages attached. Nothing checks first that a real product ID is in place, or that a LICENSE exists. One mistyped `git push --tags` publishes. | Medium |
 | **A hand install with the default prefix silently half-works.** `cmake --install` without `-DCMAKE_INSTALL_PREFIX=/usr` puts the udev rule and unit under `/usr/local/lib/`, which nothing reads. Documented in §7, but a `message(WARNING)` in `CMakeLists.txt` when the prefix is not `/usr` would catch it at the point of the mistake. | Medium |
@@ -678,49 +713,39 @@ UI, which had never been exercised before.
 
 In the order that gets the project finished.
 
-**Tagging is the last step, not an early one.** There are no tags in the
-repository, and that is deliberate. `packages.yml` triggers on any `v*` tag and
-publishes a **public GitHub Release** with the `.deb` and `.rpm` attached — so
-the tag is the act of publishing, not a bookmark. Everything is staged at
-`1.0.0` and waiting:
+**Tagging is the act of publishing, not a bookmark.** `packages.yml` triggers on
+any `v*` tag and puts out a **public GitHub Release** with the `.deb` and `.rpm`
+attached. There are no tags yet. Everything is staged at `1.0.0`, and the one
+thing still owed before tagging is a reboot test of the udev device watch (§8) —
+publishing a release whose headline fix is unverified is the wrong order.
 
-```
-1. LICENSE + README          (items 1 below)
-2. a real product ID          (item 3)
-3. git tag v1.0.0 && git push origin v1.0.0
-```
+Releasing on the test PID was weighed and accepted: what ships in a Release is
+daemon packages, not devices, and the only stick in existence carrying
+`1209:0001` is the author's own. The prohibition in §2 binds on redistributing
+*hardware*. A real PID remains item 2 below.
 
-Tag before those and the release goes out unlicensed, on a shared test PID.
-There is currently **no guard** stopping that — see §8.
-
-1. ~~Write the README and add a LICENSE.~~ **Done 2026-09-09.** GPL-3.0-or-later,
-   with `README.md` written for somebody building one from scratch — BOM,
-   wiring, flashing, per-OS install, the button and web UI, and where to find IR
-   codes. Worth re-reading once the Windows re-tests are done, since its Status
-   table makes claims that will change.
-
-2. **Verify the new codes on real TVs** if any are within reach — Samsung, Sony
+1. **Verify the new codes on real TVs** if any are within reach — Samsung, Sony
    and Toshiba are all derived rather than tested. A Samsung is the one most
    worth finding, both because it is the most common brand and because of the
    deep-sleep caveat in §4.
 
-3. **Apply to pid.codes for a product ID** — a pull request to their repository,
-   needing only a public repo with an open-source licence, so it can go in the
-   moment item 1 lands and run in parallel with everything else. Start it early:
-   it is reviewed by volunteers, so the turnaround is not yours to control. Then
+2. **Apply to pid.codes for a product ID** — a pull request to their repository,
+   needing only a public repo with an open-source licence, so it can go in at any
+   time and run in parallel with everything else. Start it early: it is reviewed
+   by volunteers, so the turnaround is not yours to control. Then
    generate the five copies from one source so the count cannot go 5 → 6. See
    §2 for why a placeholder is not an acceptable substitute.
 
-4. **Re-test Windows** against the three cases in §8, then move the service to
+3. **Re-test Windows** against the three cases in §8, then move the service to
    LocalService. The installer already grants LOCAL SERVICE rights on the log
    directory, so the only open question is whether that account can open the HID
    device — and the vendor usage page (`0xFF00`) is not one Windows restricts,
    so it very likely can. Test with
    `sc.exe config esp32-ir-remote obj= "NT AUTHORITY\LocalService"`.
 
-5. **Add display-state watching on Linux**, closing the inconsistency in §8.
+4. **Add display-state watching on Linux**, closing the inconsistency in §8.
 
-6. Add the firmware to CI.
+5. Add the firmware to CI.
 
 ### Worth considering, not required
 
@@ -750,66 +775,9 @@ Reviewed 2026-09-09. Kept as-is, with the reasoning, so they are not re-litigate
   one protects stored IR codes across a firmware update.
 - **The Linux uptime gate stays**, on the strength of the 3 a.m. unattended
   upgrade case.
-
-### Changed 2026-09-09
-
-- `onButtonHold` now uses the `HoldTimings` constants rather than hardcoded
-  literals.
-- The Windows "already off, skip the send" optimisation is gone, with the
-  `lastAsserted_` / `generation_` bookkeeping that existed only to support it.
-- `logReportDescriptor()` is gone from `HIDTransport`.
-- **Per-event timing budgets are gone.** `TvCommand::budget`, `budgetFor()` and
-  the four budget constants collapsed into one `SEND_TIMEOUT`.
-- **The transport now fails immediately when no device is enumerated**, which is
-  what fixes sleep and shutdown being delayed with the stick unplugged.
-- **`WindowsPowerCapabilities` is deleted** and display-off drives the OFF on
-  every machine.
-
-Net: 281 lines removed.
-
-### Added 2026-09-09
-
-- **The firmware watchdog** (§4). Clears what was the highest-severity gap.
-  Flashed and verified enumerating.
-- **The USB identity moved from `1234:5678` to `1209:0001`** (§2) — a made-up
-  pair replaced by pid.codes' open-hardware vendor ID and its test PID.
-  **Requires a re-flash to take effect**, since the firmware announces it.
-- **The factory default is now four profiles that all transmit** (§4). Samsung
-  and Sony filled in, Toshiba added, and TCL and Hisense **removed** rather than
-  shipped blank — a default profile that cannot work looks like support the
-  device does not have.
-- **Button hold timings shortened**: wireless config at 4 s (was 5), factory
-  reset at 16 s (was 23). The release window between them stays 3 s. Both
-  progress bars derive their span from these constants, so they rescale on
-  their own.
-- **Repository tidied.** `3D modeling/` → `hardware/`, `HID test/` →
-  `tools/hid-test/`, and no path anywhere contains a space now. `DEPRECATED/`
-  and `daemon/archive/` are deleted — both are in git history, and the archived
-  serial transport had already cost real maintenance, needing a hand-patch when
-  `ITransport` changed even though nothing compiles it. `VERSION` moved to the
-  root.
-- **Licensed GPL-3.0-or-later**, with the canonical text in `LICENSE` and the
-  declarations in `PKGBUILD`, the RPM spec and `flake.nix` all switched from the
-  MIT they had been claiming over an empty repository. Every dependency is
-  compatible: the LGPL-2.1 libraries (IRremoteESP8266, sdbus-c++) may be used
-  under GPL by their own terms, and MIT and BSD are permissive.
-- **`README.md` written**, aimed at somebody building one from scratch.
-- **Version numbering reset to 1.0.0, and the old tags deleted.** `pkgver` was
-  `0.3.0` while the only tags were `v1.0` and `v1.1` (both pointing at
-  Phase-2-era commits), so `source=` fetched a `v0.3.0` that never existed and
-  `makepkg` failed outright. Since nobody else had access to the repository, the
-  two stale tags were deleted rather than worked around, and `VERSION` and
-  `pkgver` are both **1.0.0** — the honest number for the first version that
-  works end to end. **A matching `v1.0.0` tag has to exist before the Arch
-  package will build.**
-- **Sony now transmits at 12 bits, not 20.** A real bug: SIRC has three lengths
-  and a TV is the 12-bit form, so the Sony profile could never have worked at
-  20 bits regardless of the codes.
-
-  Note that **existing devices keep their old profiles**. `Profiles::begin()`
-  only writes the defaults when `profiles.json` is absent, so a device that has
-  booted before needs a factory reset — hold the button past 16 s — to pick the
-  new set up. Flashing alone is not enough.
+- **Linux and Windows deliberately measure different clocks**, and the check is
+  not shared code. Unifying them looks like an obvious tidy-up and is wrong —
+  see §5. It was tried and reverted.
 
 ---
 

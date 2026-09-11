@@ -128,6 +128,8 @@ void WindowsPowerMonitor::run() {
 
 void WindowsPowerMonitor::serviceMain(DWORD , LPWSTR* ) {
 
+    serviceStartedAt_ = std::chrono::steady_clock::now();
+
     statusHandle_ = RegisterServiceCtrlHandlerExW(SERVICE_NAME, ServiceCtrlHandlerEx, nullptr);
     if (!statusHandle_) {
         std::cerr << "[error] RegisterServiceCtrlHandlerEx failed: " << GetLastError() << "\n";
@@ -233,7 +235,14 @@ void WindowsPowerMonitor::handleDeviceEvent(DWORD eventType, LPVOID eventData) {
     if (eventType == DBT_DEVICEARRIVAL) {
         plog("ESP32 arrived");
 
-        if (desiredOn_.has_value()) {
+        // Arrival re-asserts only while the service is still starting up, where
+        // it is what delivers the boot ON the stick was not present to receive.
+        // Later on it would override a TV somebody turned off by hand.
+        const auto sinceStart = std::chrono::steady_clock::now() - serviceStartedAt_;
+
+        if (sinceStart > ARRIVAL_GRACE) {
+            plog("past the arrival grace window — leaving the TV alone");
+        } else if (desiredOn_.has_value()) {
             requestState(*desiredOn_, Trigger::DeviceArrival);
         } else {
             plog("no state decided yet — nothing to re-assert");

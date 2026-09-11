@@ -31,6 +31,8 @@
             # sdbus-cpp (unsuffixed) is still 1.x in nixpkgs. LinuxPowerMonitor
             # requires the v2 API — see the daemon dependency notes in the brief.
             sdbus-cpp_2
+            # libudev, for the device-arrival watch. Provided by systemdLibs.
+            systemdLibs
             # The FHS-wrapped PlatformIO. The bare platformio-core will not work:
             # PlatformIO downloads a prebuilt xtensa-esp32s3-elf toolchain linked
             # against /lib64/ld-linux-x86-64.so.2, which does not exist on NixOS.
@@ -67,7 +69,7 @@
           sourceRoot = "source/daemon";
 
           nativeBuildInputs = with pkgs; [ cmake pkg-config ];
-          buildInputs = with pkgs; [ hidapi sdbus-cpp_2 ];
+          buildInputs = with pkgs; [ hidapi sdbus-cpp_2 systemdLibs ];
 
           # No installPhase — the CMakeLists now carries install() rules, so the
           # default cmake hook does the right thing with CMAKE_INSTALL_PREFIX
