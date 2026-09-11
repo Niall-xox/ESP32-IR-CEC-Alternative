@@ -44,8 +44,11 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
-# AF_UNIX is required for the D-Bus system bus socket. No other family is used.
-RestrictAddressFamilies=AF_UNIX
+# AF_UNIX for the D-Bus system bus socket; AF_NETLINK for the udev monitor,
+# which is how the daemon is told the ESP32 has appeared. Dropping AF_NETLINK
+# does not fail loudly — the daemon starts, logs one line, and silently loses
+# the ON at boot.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 # Setting DeviceAllow implies DevicePolicy=closed, restricting the daemon to
 # hidraw plus the standard pseudo-devices (null, zero, random, urandom, tty).
 DeviceAllow=char-hidraw rw

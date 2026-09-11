@@ -158,7 +158,8 @@
                 LockPersonality = true;
                 MemoryDenyWriteExecute = true;
                 SystemCallArchitectures = "native";
-                RestrictAddressFamilies = [ "AF_UNIX" ];
+                # AF_NETLINK is required by the udev monitor — see the unit file.
+                RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
                 DeviceAllow = [ "char-hidraw rw" ];
               };
             };

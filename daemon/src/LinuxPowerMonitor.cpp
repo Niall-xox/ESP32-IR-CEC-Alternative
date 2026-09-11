@@ -62,24 +62,41 @@ void LinuxPowerMonitor::assertTv(bool on, const char* reason) {
     }
 }
 
+// Each step is reported by name. The netlink socket is the one that fails in
+// practice, and it fails because of the unit's sandbox rather than anything
+// wrong with the machine — so the message says where to look.
 bool LinuxPowerMonitor::startDeviceWatch() {
     udev_ = udev_new();
-    if (!udev_) return false;
+    if (!udev_) {
+        std::cerr << "[monitor] udev_new() failed\n";
+        return false;
+    }
 
     deviceWatch_ = udev_monitor_new_from_netlink(udev_, "udev");
     if (!deviceWatch_) {
+        std::cerr << "[monitor] Could not open the udev netlink socket ("
+                  << std::strerror(errno) << "). If the daemon is running as a"
+                     " systemd unit, check RestrictAddressFamilies allows"
+                     " AF_NETLINK.\n";
         stopDeviceWatch();
         return false;
     }
 
-    if (udev_monitor_filter_add_match_subsystem_devtype(deviceWatch_, "hidraw", nullptr) < 0 ||
-        udev_monitor_enable_receiving(deviceWatch_) < 0) {
+    if (udev_monitor_filter_add_match_subsystem_devtype(deviceWatch_, "hidraw", nullptr) < 0) {
+        std::cerr << "[monitor] Could not filter the udev monitor to hidraw\n";
+        stopDeviceWatch();
+        return false;
+    }
+
+    if (udev_monitor_enable_receiving(deviceWatch_) < 0) {
+        std::cerr << "[monitor] Could not enable the udev monitor\n";
         stopDeviceWatch();
         return false;
     }
 
     deviceWatchFd_ = udev_monitor_get_fd(deviceWatch_);
     if (deviceWatchFd_ < 0) {
+        std::cerr << "[monitor] udev monitor returned no usable descriptor\n";
         stopDeviceWatch();
         return false;
     }

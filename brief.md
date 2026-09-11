@@ -465,6 +465,15 @@ uses for sleep, so `run()` waits on both at once with `poll()` rather than
 `enterEventLoop()`. If the udev watch cannot be set up it falls back to
 `enterEventLoop()` and the sleep path is unaffected.
 
+**The unit sandbox has to allow `AF_NETLINK`.** The udev monitor is a netlink
+socket, and `RestrictAddressFamilies=AF_UNIX` — which was correct when D-Bus was
+the only socket in use — blocks it. The daemon then starts normally, takes the
+inhibitor lock, handles sleep correctly, and silently loses only the boot `ON`.
+It shipped that way once. Both the unit file and the NixOS module grant it now,
+and the failure names itself in the log rather than reporting a generic
+"unavailable". Note that the fallback makes this class of failure *invisible in
+testing* unless the log is read: everything else keeps working.
+
 Two guards decide whether that `ON` is actually sent: `systemJustBooted()` —
 uptime under 3 minutes — checked at startup **and again on arrival**. The first
 stops a package upgrade restarting the service at 3 a.m. from turning your TV
@@ -665,10 +674,22 @@ changes its behaviour on S3 machines, so those need re-testing.
 
 ### Needs testing
 
-**Linux — the udev device watch.** Reboot with the stick plugged in; the journal
-should show `ESP32 appeared` followed by `ON sent and ACK received (device
-ready)`. Then confirm sleep, wake and shutdown still work, because `run()` now
-waits on `poll()` rather than `enterEventLoop()`.
+**Linux — the udev device watch.** First confirm it started at all: the journal
+must show `Watching udev for the ESP32`. If it says `udev watch unavailable`,
+the daemon has fallen back and nothing below is being tested — check the
+sandbox, per §5.
+
+With the watch up, sleep, wake and shutdown all need re-confirming, because
+`run()` is then a hand-written `poll()` loop rather than `enterEventLoop()`. The
+fallback path has been exercised; the poll loop has not.
+
+The arrival path itself is the hard one to observe, because it only fires when
+the stick is *slower* than the daemon. A boot where the journal shows
+`HID device opened` immediately followed by `ON sent and ACK received (startup)`
+proves nothing about it — the stick was simply already there. What confirms it
+is `ESP32 appeared` followed by `ON sent and ACK received (device ready)`. If a
+natural boot will not produce that, force it: start the service with the stick
+unplugged, plug it in within the 3-minute window, and watch for those two lines.
 
 **Windows** — all three need the Windows machine:
 
